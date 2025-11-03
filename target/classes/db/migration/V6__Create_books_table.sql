@@ -1,0 +1,15 @@
+CREATE TABLE books (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    isbn VARCHAR(13) UNIQUE NOT NULL,
+    title VARCHAR(255) NOT NULL,
+    author VARCHAR(255) NOT NULL,
+    publisher VARCHAR(255) NOT NULL,
+    description TEXT,
+    cover_url VARCHAR(255),
+    total_pages INT,
+    main_genre VARCHAR(50),
+    pub_date DATE,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+

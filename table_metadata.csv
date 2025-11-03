@@ -1,0 +1,56 @@
+Table_Name,Column_Name,Data_Type,Length,Is_Nullable,Is_Primary_Key,Is_Foreign_Key,Foreign_Table,Foreign_Column,Description
+users,id,BIGINT,,NO,YES,NO,,,사용자 고유 ID
+users,login_id,VARCHAR,50,NO,NO,NO,,,로그인 ID
+users,email,VARCHAR,100,NO,NO,NO,,,이메일 주소
+users,name,VARCHAR,100,NO,NO,NO,,,사용자 이름
+users,password_hash,VARCHAR,255,NO,NO,NO,,,암호화된 비밀번호
+users,role,ENUM,,NO,NO,NO,,,사용자 역할 (USER, ADMIN)
+users,status,ENUM,,NO,NO,NO,,,계정 상태 (ACTIVE, LOCKED, DELETED)
+users,failed_login_count,INT,,NO,NO,NO,,,로그인 실패 횟수
+users,last_login_at,TIMESTAMP,,YES,NO,NO,,,마지막 로그인 시간
+users,created_at,TIMESTAMP,,NO,NO,NO,,,생성 시간
+users,updated_at,TIMESTAMP,,NO,NO,NO,,,수정 시간
+books,id,BIGINT,,NO,YES,NO,,,도서 고유 ID
+books,isbn,VARCHAR,13,NO,NO,NO,,,ISBN 코드
+books,title,VARCHAR,255,NO,NO,NO,,,도서 제목
+books,author,VARCHAR,255,NO,NO,NO,,,저자
+books,publisher,VARCHAR,255,NO,NO,NO,,,출판사
+books,description,TEXT,,YES,NO,NO,,,도서 설명
+books,cover_url,VARCHAR,255,YES,NO,NO,,,표지 이미지 URL
+books,total_pages,INT,,YES,NO,NO,,,총 페이지 수
+books,main_genre,VARCHAR,50,YES,NO,NO,,,주요 장르
+books,pub_date,DATE,,YES,NO,NO,,,출판일
+books,created_at,DATETIME,,NO,NO,NO,,,생성 시간
+books,updated_at,DATETIME,,NO,NO,NO,,,수정 시간
+user_books,id,BIGINT,,NO,YES,NO,,,사용자-도서 관계 고유 ID
+user_books,user_id,BIGINT,,NO,NO,YES,users,id,사용자 ID
+user_books,book_id,BIGINT,,NO,NO,YES,books,id,도서 ID
+user_books,category,ENUM,,NO,NO,NO,,,독서 상태 (WANT_TO_READ, READING, ALMOST_FINISHED, FINISHED)
+user_books,memo,TEXT,,YES,NO,NO,,,메모
+user_books,reading_start_date,DATE,,YES,NO,NO,,,독서 시작일
+user_books,reading_progress,INT,,YES,NO,NO,,,독서 진행률 (읽은 페이지 수)
+user_books,reading_finished_date,DATE,,YES,NO,NO,,,독서 완료일
+user_books,rating,INT,,YES,NO,NO,,,평점 (1-5)
+user_books,review,TEXT,,YES,NO,NO,,,독서 후기
+user_books,created_at,DATETIME,,NO,NO,NO,,,생성 시간
+user_books,updated_at,DATETIME,,NO,NO,NO,,,수정 시간
+user_devices,id,BIGINT,,NO,YES,NO,,,디바이스 고유 ID
+user_devices,user_id,BIGINT,,NO,NO,YES,users,id,사용자 ID
+user_devices,device_id,VARCHAR,255,NO,NO,NO,,,디바이스 고유 ID
+user_devices,device_name,VARCHAR,100,NO,NO,NO,,,디바이스 이름
+user_devices,platform,ENUM,,NO,NO,NO,,,플랫폼 (WEB, ANDROID, IOS)
+user_devices,last_seen_at,TIMESTAMP,,YES,NO,NO,,,마지막 접속 시간
+user_devices,created_at,TIMESTAMP,,NO,NO,NO,,,생성 시간
+refresh_tokens,id,BIGINT,,NO,YES,NO,,,리프레시 토큰 고유 ID
+refresh_tokens,user_id,BIGINT,,NO,NO,YES,users,id,사용자 ID
+refresh_tokens,device_id,VARCHAR,255,NO,NO,NO,,,디바이스 ID
+refresh_tokens,token,VARCHAR,255,NO,NO,NO,,,리프레시 토큰
+refresh_tokens,expires_at,TIMESTAMP,,NO,NO,NO,,,만료 시간
+refresh_tokens,revoked,BOOLEAN,,NO,NO,NO,,,토큰 취소 여부
+refresh_tokens,created_at,TIMESTAMP,,NO,NO,NO,,,생성 시간
+password_reset_tokens,id,BIGINT,,NO,YES,NO,,,비밀번호 재설정 토큰 고유 ID
+password_reset_tokens,user_id,BIGINT,,NO,NO,YES,users,id,사용자 ID
+password_reset_tokens,token,VARCHAR,100,NO,NO,NO,,,재설정 토큰
+password_reset_tokens,expires_at,TIMESTAMP,,NO,NO,NO,,,만료 시간
+password_reset_tokens,used,BOOLEAN,,NO,NO,NO,,,사용 여부
+password_reset_tokens,created_at,TIMESTAMP,,NO,NO,NO,,,생성 시간
