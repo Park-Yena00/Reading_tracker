@@ -24,6 +24,9 @@ spring:
     baseline-on-migrate: true
     baseline-version: 0
     repair-on-migrate: true
+    validate-on-migrate: false
+    clean-disabled: true
+    out-of-order: true
 
 server:
   port: 8080
@@ -47,5 +50,5 @@ cors:
 aladin:
   api:
     key: ttbdpsk15151102001
-    base-url: http://www.aladin.co.kr/ttb/api
+    base-url: https://www.aladin.co.kr/ttb/api
 

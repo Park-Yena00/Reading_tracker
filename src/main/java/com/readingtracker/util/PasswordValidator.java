@@ -1,6 +1,5 @@
 package com.readingtracker.util;
 
-import com.readingtracker.common.ErrorCode;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;

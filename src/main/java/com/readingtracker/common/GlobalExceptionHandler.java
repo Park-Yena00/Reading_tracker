@@ -57,8 +57,17 @@ public class GlobalExceptionHandler {
         ex.printStackTrace();
         
         ErrorResponse errorResponse = new ErrorResponse();
-        errorResponse.setCode(ErrorCode.INTERNAL_SERVER_ERROR.getCode());
-        errorResponse.setMessage(ErrorCode.INTERNAL_SERVER_ERROR.getMessage());
+        
+        // 알라딘 API 관련 오류인 경우 메시지 포함
+        String message = ex.getMessage();
+        if (message != null && message.contains("알라딘 API")) {
+            errorResponse.setCode("ALADIN_API_ERROR");
+            errorResponse.setMessage(message);
+        } else {
+            errorResponse.setCode(ErrorCode.INTERNAL_SERVER_ERROR.getCode());
+            // 개발 환경에서는 상세 에러 메시지 포함
+            errorResponse.setMessage(message != null ? message : ErrorCode.INTERNAL_SERVER_ERROR.getMessage());
+        }
         
         return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                 .body(ApiResponse.error(errorResponse));
