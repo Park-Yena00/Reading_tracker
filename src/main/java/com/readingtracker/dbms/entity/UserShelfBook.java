@@ -6,6 +6,7 @@ import org.springframework.data.annotation.LastModifiedDate;
 import org.springframework.data.jpa.domain.support.AuditingEntityListener;
 
 import com.readingtracker.server.common.constant.BookCategory;
+import com.readingtracker.server.common.constant.PurchaseType;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -32,6 +33,10 @@ public class UserShelfBook {
     private BookCategory category;
     
     // 읽고 싶은 책: 기대평 (선택)
+    @Column(name = "expectation", length = 500)
+    private String expectation;
+    
+    // 메모 (Memo table과 구분)
     @Column(name = "memo", columnDefinition = "TEXT")
     private String memo;
     
@@ -42,6 +47,11 @@ public class UserShelfBook {
     // 읽는 중인 책 / 거의 다 읽은 책: 독서량 (읽은 페이지 수)
     @Column(name = "reading_progress")
     private Integer readingProgress;
+    
+    // 읽는 중인 책: 구매/대여 여부 (선택)
+    @Enumerated(EnumType.STRING)
+    @Column(name = "purchase_type", length = 20)
+    private PurchaseType purchaseType;
     
     // 완독한 책: 독서 종료일
     @Column(name = "reading_finished_date")
@@ -77,9 +87,11 @@ public class UserShelfBook {
     public User getUser() { return user; }
     public Book getBook() { return book; }
     public BookCategory getCategory() { return category; }
+    public String getExpectation() { return expectation; }
     public String getMemo() { return memo; }
     public LocalDate getReadingStartDate() { return readingStartDate; }
     public Integer getReadingProgress() { return readingProgress; }
+    public PurchaseType getPurchaseType() { return purchaseType; }
     public LocalDate getReadingFinishedDate() { return readingFinishedDate; }
     public Integer getRating() { return rating; }
     public String getReview() { return review; }
@@ -96,9 +108,11 @@ public class UserShelfBook {
     public void setUser(User user) { this.user = user; }
     public void setBook(Book book) { this.book = book; }
     public void setCategory(BookCategory category) { this.category = category; }
+    public void setExpectation(String expectation) { this.expectation = expectation; }
     public void setMemo(String memo) { this.memo = memo; }
     public void setReadingStartDate(LocalDate readingStartDate) { this.readingStartDate = readingStartDate; }
     public void setReadingProgress(Integer readingProgress) { this.readingProgress = readingProgress; }
+    public void setPurchaseType(PurchaseType purchaseType) { this.purchaseType = purchaseType; }
     public void setReadingFinishedDate(LocalDate readingFinishedDate) { this.readingFinishedDate = readingFinishedDate; }
     public void setRating(Integer rating) { this.rating = rating; }
     public void setReview(String review) { this.review = review; }

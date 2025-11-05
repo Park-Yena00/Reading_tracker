@@ -1,7 +1,9 @@
 package com.readingtracker.server.service;
 
 import com.readingtracker.server.common.constant.BookCategory;
+import com.readingtracker.server.common.constant.BookSortCriteria;
 import com.readingtracker.server.dto.clientserverDTO.requestDTO.BookAdditionRequest;
+import com.readingtracker.server.dto.clientserverDTO.requestDTO.BookDetailUpdateRequest;
 import com.readingtracker.dbms.entity.Book;
 import com.readingtracker.dbms.entity.User;
 import com.readingtracker.dbms.entity.UserShelfBook;
@@ -12,6 +14,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
@@ -37,35 +40,182 @@ public class BookService {
         User user = userRepository.findActiveUserByLoginId(loginId)
             .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
         
-        // 2. ISBN으로 책 조회 또는 생성
-        Book book = findOrCreateBook(request);
+        // 2. ISBN으로 Book 테이블에 이미 존재하는지 확인
+        if (bookRepository.existsByIsbn(request.getIsbn())) {
+            throw new IllegalArgumentException("이미 Book 테이블에 존재하는 ISBN입니다. 직접 등록할 수 없습니다.");
+        }
         
-        // 3. 중복 추가 방지 체크
+        // 3. 직접 입력한 정보로 Book 생성 (알라딘 API 호출 없음)
+        Book book = createBookFromRequest(request);
+        
+        // 4. 중복 추가 방지 체크
         Optional<UserShelfBook> existingBook = userBookRepository.findByUserIdAndBookId(user.getId(), book.getId());
         if (existingBook.isPresent()) {
             throw new IllegalArgumentException("이미 내 서재에 추가된 책입니다.");
         }
         
-        // 4. UserBook 생성 (도메인 로직 사용)
+        // 5. UserBook 생성 및 카테고리별 입력값 설정
         UserShelfBook userBook = new UserShelfBook(user, book, request.getCategory());
+        setCategorySpecificFields(userBook, request);
         
         return userBookRepository.save(userBook);
+    }
+    
+    /**
+     * 카테고리별 입력값 설정
+     */
+    private void setCategorySpecificFields(UserShelfBook userBook, BookAdditionRequest request) {
+        BookCategory category = request.getCategory();
+        
+        switch (category) {
+            case ToRead:
+                // 기대평 (선택사항)
+                if (request.getExpectation() != null && !request.getExpectation().trim().isEmpty()) {
+                    if (request.getExpectation().length() > 500) {
+                        throw new IllegalArgumentException("기대평은 500자 이하여야 합니다.");
+                    }
+                    userBook.setExpectation(request.getExpectation());
+                }
+                break;
+                
+            case Reading:
+                // 독서 시작일 (필수)
+                if (request.getReadingStartDate() == null) {
+                    throw new IllegalArgumentException("독서 시작일은 필수 입력 항목입니다.");
+                }
+                userBook.setReadingStartDate(request.getReadingStartDate());
+                
+                // 현재 읽은 페이지 수 (필수)
+                if (request.getReadingProgress() == null) {
+                    throw new IllegalArgumentException("현재 읽은 페이지 수는 필수 입력 항목입니다.");
+                }
+                // 전체 페이지 수와 비교 검증
+                Integer totalPages = userBook.getBook().getTotalPages();
+                if (totalPages != null && request.getReadingProgress() > totalPages) {
+                    throw new IllegalArgumentException("읽은 페이지 수는 전체 페이지 수(" + totalPages + ")를 초과할 수 없습니다.");
+                }
+                if (request.getReadingProgress() < 0) {
+                    throw new IllegalArgumentException("읽은 페이지 수는 0 이상이어야 합니다.");
+                }
+                userBook.setReadingProgress(request.getReadingProgress());
+                
+                // 구매/대여 여부 (선택사항)
+                if (request.getPurchaseType() != null) {
+                    userBook.setPurchaseType(request.getPurchaseType());
+                }
+                break;
+                
+            case AlmostFinished:
+                // 독서 시작일 (필수)
+                if (request.getReadingStartDate() == null) {
+                    throw new IllegalArgumentException("독서 시작일은 필수 입력 항목입니다.");
+                }
+                userBook.setReadingStartDate(request.getReadingStartDate());
+                
+                // 현재 읽은 페이지 수 (필수)
+                if (request.getReadingProgress() == null) {
+                    throw new IllegalArgumentException("현재 읽은 페이지 수는 필수 입력 항목입니다.");
+                }
+                // 전체 페이지 수와 비교 검증
+                Integer totalPages2 = userBook.getBook().getTotalPages();
+                if (totalPages2 != null && request.getReadingProgress() > totalPages2) {
+                    throw new IllegalArgumentException("읽은 페이지 수는 전체 페이지 수(" + totalPages2 + ")를 초과할 수 없습니다.");
+                }
+                if (request.getReadingProgress() < 0) {
+                    throw new IllegalArgumentException("읽은 페이지 수는 0 이상이어야 합니다.");
+                }
+                userBook.setReadingProgress(request.getReadingProgress());
+                break;
+                
+            case Finished:
+                // 독서 시작일 (필수)
+                if (request.getReadingStartDate() == null) {
+                    throw new IllegalArgumentException("독서 시작일은 필수 입력 항목입니다.");
+                }
+                userBook.setReadingStartDate(request.getReadingStartDate());
+                
+                // 독서 종료일 (필수)
+                if (request.getReadingFinishedDate() == null) {
+                    throw new IllegalArgumentException("독서 종료일은 필수 입력 항목입니다.");
+                }
+                // 독서 종료일이 독서 시작일 이후인지 검증
+                if (request.getReadingFinishedDate().isBefore(request.getReadingStartDate())) {
+                    throw new IllegalArgumentException("독서 종료일은 독서 시작일 이후여야 합니다.");
+                }
+                userBook.setReadingFinishedDate(request.getReadingFinishedDate());
+                
+                // 평점 (필수, 1~5)
+                if (request.getRating() == null) {
+                    throw new IllegalArgumentException("평점은 필수 입력 항목입니다.");
+                }
+                if (request.getRating() < 1 || request.getRating() > 5) {
+                    throw new IllegalArgumentException("평점은 1 이상 5 이하여야 합니다.");
+                }
+                userBook.setRating(request.getRating());
+                
+                // 후기 (선택사항)
+                if (request.getReview() != null && !request.getReview().trim().isEmpty()) {
+                    userBook.setReview(request.getReview());
+                }
+                break;
+        }
     }
     
     /**
      * 내 서재 조회
      */
     @Transactional(readOnly = true)
-    public List<UserShelfBook> getMyShelf(String loginId, BookCategory category) {
+    public List<UserShelfBook> getMyShelf(String loginId, BookCategory category, BookSortCriteria sortBy) {
         // 1. 사용자 조회
         User user = userRepository.findActiveUserByLoginId(loginId)
             .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
         
-        // 2. 내 서재 조회
+        // 2. 정렬 기준이 지정되지 않은 경우 기본값은 도서명 오름차순
+        if (sortBy == null) {
+            sortBy = BookSortCriteria.TITLE;
+        }
+        
+        // 3. 카테고리와 정렬 기준에 따라 내 서재 조회
         if (category != null) {
-            return userBookRepository.findByUserIdAndCategoryOrderByCreatedAtDesc(user.getId(), category);
+            return getMyShelfByCategoryAndSort(user.getId(), category, sortBy);
         } else {
-            return userBookRepository.findByUserIdOrderByCreatedAtDesc(user.getId());
+            return getMyShelfBySort(user.getId(), sortBy);
+        }
+    }
+    
+    /**
+     * 카테고리별 정렬된 내 서재 조회
+     */
+    private List<UserShelfBook> getMyShelfByCategoryAndSort(Long userId, BookCategory category, BookSortCriteria sortBy) {
+        switch (sortBy) {
+            case TITLE:
+                return userBookRepository.findByUserIdAndCategoryOrderByTitleAsc(userId, category);
+            case AUTHOR:
+                return userBookRepository.findByUserIdAndCategoryOrderByAuthorAsc(userId, category);
+            case PUBLISHER:
+                return userBookRepository.findByUserIdAndCategoryOrderByPublisherAsc(userId, category);
+            case GENRE:
+                return userBookRepository.findByUserIdAndCategoryOrderByGenreAsc(userId, category);
+            default:
+                return userBookRepository.findByUserIdAndCategoryOrderByTitleAsc(userId, category);
+        }
+    }
+    
+    /**
+     * 정렬된 내 서재 조회 (카테고리 없음)
+     */
+    private List<UserShelfBook> getMyShelfBySort(Long userId, BookSortCriteria sortBy) {
+        switch (sortBy) {
+            case TITLE:
+                return userBookRepository.findByUserIdOrderByTitleAsc(userId);
+            case AUTHOR:
+                return userBookRepository.findByUserIdOrderByAuthorAsc(userId);
+            case PUBLISHER:
+                return userBookRepository.findByUserIdOrderByPublisherAsc(userId);
+            case GENRE:
+                return userBookRepository.findByUserIdOrderByGenreAsc(userId);
+            default:
+                return userBookRepository.findByUserIdOrderByTitleAsc(userId);
         }
     }
     
@@ -113,90 +263,158 @@ public class BookService {
     }
     
     /**
-     * 책 조회 또는 생성
+     * 책 상세 정보 변경
+     * 카테고리별 입력값에 따라 기존 값은 유지하고, 새 값만 업데이트
      */
-    private Book findOrCreateBook(BookAdditionRequest request) {
-        // 1. ISBN으로 기존 책 조회
-        Optional<Book> existingBook = bookRepository.findByIsbn(request.getIsbn());
-        if (existingBook.isPresent()) {
-            return existingBook.get();
+    public UserShelfBook updateBookDetail(String loginId, Long userBookId, BookDetailUpdateRequest request) {
+        // 1. 사용자 조회
+        User user = userRepository.findActiveUserByLoginId(loginId)
+            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
+        
+        // 2. UserBook 조회 및 소유권 확인
+        UserShelfBook userBook = userBookRepository.findById(userBookId)
+            .orElseThrow(() -> new IllegalArgumentException("책을 찾을 수 없습니다."));
+        
+        if (!userBook.getUserId().equals(user.getId())) {
+            throw new IllegalArgumentException("권한이 없습니다.");
         }
         
-        // 2. ISBN으로 알라딘 API에서 책 정보 조회
-        BookInfo bookInfo = getBookInfoFromAladin(request.getIsbn());
+        // 3. 현재 카테고리에 따라 입력값 업데이트 (기존 값은 유지)
+        updateCategorySpecificFields(userBook, request);
         
-        // 3. 새 책 생성
+        // 4. 업데이트 시간 갱신
+        userBook.setUpdatedAt(LocalDateTime.now());
+        
+        return userBookRepository.save(userBook);
+    }
+    
+    /**
+     * 카테고리별 입력값 업데이트
+     * 기존 값은 유지하고, 새로 입력된 값만 업데이트
+     */
+    private void updateCategorySpecificFields(UserShelfBook userBook, BookDetailUpdateRequest request) {
+        BookCategory category = userBook.getCategory();
+        
+        switch (category) {
+            case ToRead:
+                // 기대평 (선택사항) - 입력된 경우에만 업데이트
+                if (request.getExpectation() != null) {
+                    if (request.getExpectation().length() > 500) {
+                        throw new IllegalArgumentException("기대평은 500자 이하여야 합니다.");
+                    }
+                    userBook.setExpectation(request.getExpectation());
+                }
+                break;
+                
+            case Reading:
+                // 독서 시작일 (필수) - 입력된 경우에만 업데이트
+                if (request.getReadingStartDate() != null) {
+                    userBook.setReadingStartDate(request.getReadingStartDate());
+                }
+                
+                // 현재 읽은 페이지 수 (필수) - 입력된 경우에만 업데이트
+                if (request.getReadingProgress() != null) {
+                    // 전체 페이지 수와 비교 검증
+                    Integer totalPages = userBook.getBook().getTotalPages();
+                    if (totalPages != null && request.getReadingProgress() > totalPages) {
+                        throw new IllegalArgumentException("읽은 페이지 수는 전체 페이지 수(" + totalPages + ")를 초과할 수 없습니다.");
+                    }
+                    if (request.getReadingProgress() < 0) {
+                        throw new IllegalArgumentException("읽은 페이지 수는 0 이상이어야 합니다.");
+                    }
+                    userBook.setReadingProgress(request.getReadingProgress());
+                }
+                
+                // 구매/대여 여부 (선택사항) - 입력된 경우에만 업데이트
+                if (request.getPurchaseType() != null) {
+                    userBook.setPurchaseType(request.getPurchaseType());
+                }
+                break;
+                
+            case AlmostFinished:
+                // 독서 시작일 (필수) - 입력된 경우에만 업데이트
+                if (request.getReadingStartDate() != null) {
+                    userBook.setReadingStartDate(request.getReadingStartDate());
+                }
+                
+                // 현재 읽은 페이지 수 (필수) - 입력된 경우에만 업데이트
+                if (request.getReadingProgress() != null) {
+                    // 전체 페이지 수와 비교 검증
+                    Integer totalPages = userBook.getBook().getTotalPages();
+                    if (totalPages != null && request.getReadingProgress() > totalPages) {
+                        throw new IllegalArgumentException("읽은 페이지 수는 전체 페이지 수(" + totalPages + ")를 초과할 수 없습니다.");
+                    }
+                    if (request.getReadingProgress() < 0) {
+                        throw new IllegalArgumentException("읽은 페이지 수는 0 이상이어야 합니다.");
+                    }
+                    userBook.setReadingProgress(request.getReadingProgress());
+                }
+                break;
+                
+            case Finished:
+                // 독서 시작일 - 입력된 경우에만 업데이트
+                if (request.getReadingStartDate() != null) {
+                    userBook.setReadingStartDate(request.getReadingStartDate());
+                }
+                
+                // 독서 종료일 - 입력된 경우에만 업데이트
+                if (request.getReadingFinishedDate() != null) {
+                    // 독서 종료일이 독서 시작일 이후인지 검증
+                    LocalDate readingStartDate = userBook.getReadingStartDate();
+                    if (readingStartDate != null && request.getReadingFinishedDate().isBefore(readingStartDate)) {
+                        throw new IllegalArgumentException("독서 종료일은 독서 시작일 이후여야 합니다.");
+                    }
+                    userBook.setReadingFinishedDate(request.getReadingFinishedDate());
+                }
+                
+                // 평점 - 입력된 경우에만 업데이트
+                if (request.getRating() != null) {
+                    if (request.getRating() < 1 || request.getRating() > 5) {
+                        throw new IllegalArgumentException("평점은 1 이상 5 이하여야 합니다.");
+                    }
+                    userBook.setRating(request.getRating());
+                }
+                
+                // 후기 (선택사항) - 입력된 경우에만 업데이트
+                if (request.getReview() != null) {
+                    userBook.setReview(request.getReview());
+                }
+                break;
+        }
+    }
+    
+    /**
+     * 직접 입력한 정보로 Book 생성
+     */
+    private Book createBookFromRequest(BookAdditionRequest request) {
+        // 직접 입력한 정보로 새 책 생성
         Book newBook = new Book(
             request.getIsbn(),
-            bookInfo.getTitle(),
-            bookInfo.getAuthor(),
-            bookInfo.getPublisher()
+            request.getTitle(),
+            request.getAuthor(),
+            request.getPublisher()
         );
         
-        // 4. 추가 정보 설정
-        newBook.setDescription(bookInfo.getDescription());
-        newBook.setCoverUrl(bookInfo.getCoverUrl());
-        newBook.setTotalPages(bookInfo.getTotalPages());
-        newBook.setMainGenre(bookInfo.getMainGenre());
-        newBook.setPubDate(bookInfo.getPubDate());
+        // 추가 정보 설정 (선택사항)
+        if (request.getDescription() != null) {
+            newBook.setDescription(request.getDescription());
+        }
+        if (request.getCoverUrl() != null) {
+            newBook.setCoverUrl(request.getCoverUrl());
+        }
+        if (request.getTotalPages() != null) {
+            newBook.setTotalPages(request.getTotalPages());
+        }
+        if (request.getMainGenre() != null) {
+            newBook.setMainGenre(request.getMainGenre());
+        }
+        if (request.getPubDate() != null) {
+            newBook.setPubDate(request.getPubDate());
+        }
+        
         newBook.setCreatedAt(LocalDateTime.now());
         newBook.setUpdatedAt(LocalDateTime.now());
         
         return bookRepository.save(newBook);
-    }
-    
-    /**
-     * 알라딘 API에서 ISBN으로 책 정보 조회
-     */
-    private BookInfo getBookInfoFromAladin(String isbn) {
-        // 알라딘 API 호출 로직 (간단한 구현)
-        // 실제로는 AladinApiService를 사용해야 함
-        BookInfo bookInfo = new BookInfo();
-        bookInfo.setIsbn(isbn);
-        bookInfo.setTitle("책 제목 (알라딘 API에서 조회)");
-        bookInfo.setAuthor("저자명 (알라딘 API에서 조회)");
-        bookInfo.setPublisher("출판사명 (알라딘 API에서 조회)");
-        bookInfo.setDescription("책 설명 (알라딘 API에서 조회)");
-        bookInfo.setCoverUrl("표지 URL (알라딘 API에서 조회)");
-        bookInfo.setTotalPages(300);
-        bookInfo.setMainGenre("소설");
-        bookInfo.setPubDate(LocalDateTime.now().toLocalDate());
-        
-        return bookInfo;
-    }
-    
-    /**
-     * 책 정보 DTO (내부용)
-     */
-    private static class BookInfo {
-        private String isbn;
-        private String title;
-        private String author;
-        private String publisher;
-        private String description;
-        private String coverUrl;
-        private Integer totalPages;
-        private String mainGenre;
-        private java.time.LocalDate pubDate;
-        
-        // Getters and Setters
-        public String getIsbn() { return isbn; }
-        public void setIsbn(String isbn) { this.isbn = isbn; }
-        public String getTitle() { return title; }
-        public void setTitle(String title) { this.title = title; }
-        public String getAuthor() { return author; }
-        public void setAuthor(String author) { this.author = author; }
-        public String getPublisher() { return publisher; }
-        public void setPublisher(String publisher) { this.publisher = publisher; }
-        public String getDescription() { return description; }
-        public void setDescription(String description) { this.description = description; }
-        public String getCoverUrl() { return coverUrl; }
-        public void setCoverUrl(String coverUrl) { this.coverUrl = coverUrl; }
-        public Integer getTotalPages() { return totalPages; }
-        public void setTotalPages(Integer totalPages) { this.totalPages = totalPages; }
-        public String getMainGenre() { return mainGenre; }
-        public void setMainGenre(String mainGenre) { this.mainGenre = mainGenre; }
-        public java.time.LocalDate getPubDate() { return pubDate; }
-        public void setPubDate(java.time.LocalDate pubDate) { this.pubDate = pubDate; }
     }
 }

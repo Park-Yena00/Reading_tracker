@@ -30,6 +30,8 @@ public class SecurityConfig {
                 .requestMatchers("/api/v1/auth/signup", "/api/v1/auth/login", "/api/v1/auth/refresh", "/api/v1/auth/find-login-id", "/api/v1/auth/verify-account", "/api/v1/auth/reset-password").permitAll()
                 // 책 검색 API는 인증 없이 접근 가능
                 .requestMatchers("/api/v1/books/search").permitAll()
+                // 도서 세부 정보 검색 API는 인증 없이 접근 가능
+                .requestMatchers("/api/v1/books/**").permitAll()
                 // Swagger UI 접근 허용
                 .requestMatchers("/swagger-ui/**", "/swagger-ui.html", "/v3/api-docs/**", "/swagger-resources/**", "/webjars/**").permitAll()
                 // 기타 모든 요청은 인증 필요

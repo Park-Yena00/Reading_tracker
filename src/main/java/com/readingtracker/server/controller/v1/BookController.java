@@ -1,10 +1,14 @@
 package com.readingtracker.server.controller.v1;
 
 import com.readingtracker.server.common.constant.BookCategory;
+import com.readingtracker.server.common.constant.BookSearchFilter;
+import com.readingtracker.server.common.constant.BookSortCriteria;
 import com.readingtracker.server.dto.ApiResponse;
 import com.readingtracker.server.dto.clientserverDTO.requestDTO.BookAdditionRequest;
+import com.readingtracker.server.dto.clientserverDTO.requestDTO.BookDetailUpdateRequest;
 import com.readingtracker.server.dto.clientserverDTO.requestDTO.BookSearchRequest;
 import com.readingtracker.server.dto.clientserverDTO.responseDTO.BookAdditionResponse;
+import com.readingtracker.server.dto.clientserverDTO.responseDTO.BookDetailResponse;
 import com.readingtracker.server.dto.clientserverDTO.responseDTO.BookSearchResponse;
 import com.readingtracker.server.dto.clientserverDTO.responseDTO.MyShelfResponse;
 import com.readingtracker.dbms.entity.Book;
@@ -19,6 +23,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.bind.annotation.*;
+
+import jakarta.validation.Valid;
 
 import java.util.List;
 import java.util.stream.Collectors;
@@ -46,15 +52,37 @@ public class BookController extends BaseV1Controller {
     public ApiResponse<BookSearchResponse> searchBooks(
             @Parameter(description = "검색어", required = true)
             @RequestParam String query,
-            @Parameter(description = "검색 타입 (Title, Author, Publisher, Keyword)")
-            @RequestParam(defaultValue = "Title") String queryType,
+            @Parameter(description = "검색 필터 (TITLE: 도서명, AUTHOR: 저자명, PUBLISHER: 출판사명)")
+            @RequestParam(defaultValue = "TITLE") BookSearchFilter queryType,
             @Parameter(description = "시작 페이지")
             @RequestParam(defaultValue = "1") Integer start,
             @Parameter(description = "페이지당 결과 수 (최대 50)")
             @RequestParam(defaultValue = "10") Integer maxResults) {
         
-        BookSearchRequest request = new BookSearchRequest(query, queryType, start, maxResults);
+        BookSearchRequest request = new BookSearchRequest();
+        request.setQuery(query);
+        request.setQueryType(queryType);
+        request.setStart(start);
+        request.setMaxResults(maxResults);
         BookSearchResponse response = aladinApiService.searchBooks(request);
+        
+        return ApiResponse.success(response);
+    }
+    
+    /**
+     * 도서 세부 정보 검색 (비인증)
+     * GET /api/v1/books/{isbn}
+     */
+    @GetMapping("/books/{isbn}")
+    @Operation(
+        summary = "도서 세부 정보 검색",
+        description = "ISBN을 통해 알라딘 Open API에서 도서의 상세 정보를 조회합니다 (비인증 접근 가능)"
+    )
+    public ApiResponse<BookDetailResponse> getBookDetail(
+            @Parameter(description = "도서 ISBN", required = true)
+            @PathVariable String isbn) {
+        
+        BookDetailResponse response = aladinApiService.getBookDetail(isbn);
         
         return ApiResponse.success(response);
     }
@@ -71,7 +99,7 @@ public class BookController extends BaseV1Controller {
     )
     public ApiResponse<BookAdditionResponse> addBookToShelf(
             @Parameter(description = "책 추가 정보", required = true)
-            @RequestBody BookAdditionRequest request) {
+            @Valid @RequestBody BookAdditionRequest request) {
         
         // 현재 로그인한 사용자 ID 가져오기
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
@@ -97,19 +125,21 @@ public class BookController extends BaseV1Controller {
     @GetMapping("/user/books")
     @Operation(
         summary = "내 서재 조회", 
-        description = "내 서재에 있는 책 목록을 조회합니다 (인증 필요)",
+        description = "내 서재에 있는 책 목록을 조회합니다 (인증 필요). 정렬 기준: 도서명(TITLE), 저자명(AUTHOR), 출판사명(PUBLISHER), 태그/메인 장르(GENRE). 모든 정렬은 가나다순/ABC순 오름차순입니다.",
         security = @SecurityRequirement(name = "bearerAuth")
     )
     public ApiResponse<MyShelfResponse> getMyShelf(
-            @Parameter(description = "카테고리 필터 (READ_LATER, READING, NEARLY_DONE, COMPLETED)")
-            @RequestParam(required = false) BookCategory category) {
+            @Parameter(description = "카테고리 필터 (ToRead, Reading, AlmostFinished, Finished)")
+            @RequestParam(required = false) BookCategory category,
+            @Parameter(description = "정렬 기준 (TITLE: 도서명, AUTHOR: 저자명, PUBLISHER: 출판사명, GENRE: 태그/메인 장르). 기본값: TITLE")
+            @RequestParam(required = false) BookSortCriteria sortBy) {
         
         // 현재 로그인한 사용자 ID 가져오기
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         String loginId = (String) authentication.getPrincipal();
         
         // 내 서재 조회
-        List<UserShelfBook> userBooks = bookService.getMyShelf(loginId, category);
+        List<UserShelfBook> userBooks = bookService.getMyShelf(loginId, category, sortBy);
         
         // DTO 변환
         List<MyShelfResponse.ShelfBook> shelfBooks = userBooks.stream()
@@ -169,6 +199,32 @@ public class BookController extends BaseV1Controller {
         bookService.updateBookCategory(loginId, userBookId, category);
         
         return ApiResponse.success("책의 읽기 상태가 변경되었습니다.");
+    }
+    
+    /**
+     * 책 상세 정보 변경 (인증 필요)
+     * PUT /api/v1/user/books/{userBookId}
+     */
+    @PutMapping("/user/books/{userBookId}")
+    @Operation(
+        summary = "책 상세 정보 변경", 
+        description = "독서 시작일, 독서 종료일, 진행률(페이지수), 평점, 후기 등 책의 상세 정보를 변경합니다 (인증 필요). 기존 값은 유지되고, 입력된 값만 업데이트됩니다.",
+        security = @SecurityRequirement(name = "bearerAuth")
+    )
+    public ApiResponse<String> updateBookDetail(
+            @Parameter(description = "사용자 책 ID", required = true)
+            @PathVariable Long userBookId,
+            @Parameter(description = "책 상세 정보 변경 요청", required = true)
+            @Valid @RequestBody BookDetailUpdateRequest request) {
+        
+        // 현재 로그인한 사용자 ID 가져오기
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        String loginId = (String) authentication.getPrincipal();
+        
+        // 책 상세 정보 변경 처리
+        bookService.updateBookDetail(loginId, userBookId, request);
+        
+        return ApiResponse.success("책 상세 정보가 변경되었습니다.");
     }
     
     /**
