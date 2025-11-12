@@ -2,6 +2,7 @@ package com.readingtracker.server.dto.clientserverDTO.requestDTO;
 
 import java.time.LocalDate;
 
+import com.readingtracker.server.common.constant.BookCategory;
 import com.readingtracker.server.common.constant.PurchaseType;
 
 import jakarta.validation.constraints.Size;
@@ -12,6 +13,9 @@ import jakarta.validation.constraints.Max;
  * 책 상세 정보 변경 요청 DTO
  */
 public class BookDetailUpdateRequest {
+    
+    // 카테고리 변경 (선택사항, "독서 시작" 버튼 클릭 시 등)
+    private BookCategory category;
     
     // 카테고리별 입력값 필드
     
@@ -44,6 +48,7 @@ public class BookDetailUpdateRequest {
     public BookDetailUpdateRequest() {}
     
     // Getters
+    public BookCategory getCategory() { return category; }
     public String getExpectation() { return expectation; }
     public LocalDate getReadingStartDate() { return readingStartDate; }
     public Integer getReadingProgress() { return readingProgress; }
@@ -53,6 +58,7 @@ public class BookDetailUpdateRequest {
     public String getReview() { return review; }
     
     // Setters
+    public void setCategory(BookCategory category) { this.category = category; }
     public void setExpectation(String expectation) { this.expectation = expectation; }
     public void setReadingStartDate(LocalDate readingStartDate) { this.readingStartDate = readingStartDate; }
     public void setReadingProgress(Integer readingProgress) { this.readingProgress = readingProgress; }
@@ -61,4 +67,7 @@ public class BookDetailUpdateRequest {
     public void setRating(Integer rating) { this.rating = rating; }
     public void setReview(String review) { this.review = review; }
 }
+
+
+
 

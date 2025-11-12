@@ -307,6 +307,11 @@
      - 설명: 전체 분량은 Book table에서 가져오는 책의 상세 정보(`total_pages`)에서 가져오기, 사용자는 현재 마지막으로 읽은 페이지 수만 정수로 입력
      - Nullable: false
      - 검증: 0 이상, total_pages 이하
+   - 구매/대여 여부 (선택사항)
+     - Column: `purchase_type` (ENUM 또는 VARCHAR, 신규 추가 필요)
+     - Table: `user_books`
+     - Type: Enum (예: `PurchaseType.PURCHASE`, `PurchaseType.RENTAL`)
+     - Nullable: true
 
 4. **완독한 책 (Finished)**
    - 독서 시작일 (필수)
@@ -322,6 +327,11 @@
      - Format: 년-월-날짜 (yyyy-MM-dd)
      - Nullable: false
      - 검증: 독서 시작일 이후 날짜
+   - 구매/대여 여부 (선택사항)
+     - Column: `purchase_type` (ENUM 또는 VARCHAR, 신규 추가 필요)
+     - Table: `user_books`
+     - Type: Enum (예: `PurchaseType.PURCHASE`, `PurchaseType.RENTAL`)
+     - Nullable: true
    - 평점 (필수)
      - Column: `rating` (INT)
      - Table: `user_books`
@@ -520,17 +530,17 @@
 ## 📊 구현 진행 상황 체크리스트
 
 ### Phase 1: 도서 검색 기능 완성
-- [ ] 1-1. 도서 검색 필터 개선
-  - [ ] BookSearchFilter Enum 생성
-  - [ ] BookSearchRequest 수정
-  - [ ] AladinApiService 수정
-  - [ ] BookController 수정
-- [ ] 1-2. 도서 세부 정보 검색 API 추가
+- [x] 1-1. 도서 검색 필터 개선
+  - [x] BookSearchFilter Enum 생성
+  - [x] BookSearchRequest 수정
+  - [x] AladinApiService 수정
+  - [x] BookController 수정
+- [x] 1-2. 도서 세부 정보 검색 API 추가
 
 ### Phase 2: 내 서재 기능 확장
-- [ ] 2-1. 내 서재에 책 정보 직접 등록
-- [ ] 2-2. 책 상세 정보 변경
-- [ ] 2-3. 저장된 책 정렬 변경
+- [x] 2-1. 내 서재에 책 정보 직접 등록
+- [x] 2-2. 책 상세 정보 변경
+- [x] 2-3. 저장된 책 정렬 변경
 - [ ] 2-4. 책 카테고리 자동 변경 로직
 
 ### Phase 3: 기타 기능

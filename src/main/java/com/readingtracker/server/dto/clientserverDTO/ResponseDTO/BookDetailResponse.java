@@ -61,3 +61,6 @@ public class BookDetailResponse {
     public void setMainGenre(String mainGenre) { this.mainGenre = mainGenre; }
 }
 
+
+
+

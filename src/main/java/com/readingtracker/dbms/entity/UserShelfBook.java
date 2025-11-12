@@ -32,6 +32,10 @@ public class UserShelfBook {
     @Column(name = "category", nullable = false, length = 50)
     private BookCategory category;
     
+    // 명시적으로 카테고리를 변경했는지 여부 (자동 변경 vs 수동 변경 구분)
+    @Column(name = "category_manually_set", nullable = false)
+    private Boolean categoryManuallySet = false;
+    
     // 읽고 싶은 책: 기대평 (선택)
     @Column(name = "expectation", length = 500)
     private String expectation;
@@ -87,6 +91,7 @@ public class UserShelfBook {
     public User getUser() { return user; }
     public Book getBook() { return book; }
     public BookCategory getCategory() { return category; }
+    public Boolean isCategoryManuallySet() { return categoryManuallySet; }
     public String getExpectation() { return expectation; }
     public String getMemo() { return memo; }
     public LocalDate getReadingStartDate() { return readingStartDate; }
@@ -108,6 +113,7 @@ public class UserShelfBook {
     public void setUser(User user) { this.user = user; }
     public void setBook(Book book) { this.book = book; }
     public void setCategory(BookCategory category) { this.category = category; }
+    public void setCategoryManuallySet(Boolean categoryManuallySet) { this.categoryManuallySet = categoryManuallySet; }
     public void setExpectation(String expectation) { this.expectation = expectation; }
     public void setMemo(String memo) { this.memo = memo; }
     public void setReadingStartDate(LocalDate readingStartDate) { this.readingStartDate = readingStartDate; }

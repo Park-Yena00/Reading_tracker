@@ -339,6 +339,10 @@ books (1) ← (N) user_books
   - `requestDTO`: 클라이언트 → 서버 요청 DTO
   - `responseDTO`: 서버 → 클라이언트 응답 DTO
   - `ApiResponse.java`, `ErrorResponse.java`: 공통 응답 래퍼 (dto 바로 아래)
+- **웹/앱 공유 정책**:
+  - 웹과 앱이 완전히 동일한 DTO 사용
+  - 날짜, 시간 등 데이터 포맷팅은 각 클라이언트에서 처리
+  - 서버는 표준 형식(ISO 8601 등)으로 데이터 제공
 
 #### 2. ServerDbmsDTO (Server ↔ DBMS 경계)
 - **용도**: 서버 내부 로직과 DBMS 간 통신
@@ -433,6 +437,22 @@ books (1) ← (N) user_books
 - **dbms 패키지**: DBMS 관련 및 Server ↔ DBMS 경계 관리
 - **이유**: 경계 중심 구조로 의존성 방향 명확화, 확장성 향상
 
+### 6. DTO 공유 및 데이터 포맷팅 정책
+- **결정**: 웹과 앱이 완전히 동일한 DTO를 사용
+- **포맷팅**: 날짜, 시간 등 데이터 포맷팅은 각 클라이언트(웹/앱)에서 처리
+- **이유**: 
+  - 서버는 순수한 데이터만 제공
+  - 클라이언트별 UI 요구사항에 맞는 포맷팅 가능
+  - 서버 로직 단순화 및 유지보수성 향상
+- **예시**: 
+  - 서버: `createdAt: "2024-01-15T10:30:00"` (ISO 8601 형식)
+  - 웹: "2024년 1월 15일 10시 30분"으로 포맷팅
+  - 앱: "1/15 10:30" 또는 "2시간 전"으로 포맷팅
+- **주의사항**: 
+  - 서버는 표준 형식(ISO 8601 등)으로 데이터 제공
+  - 포맷팅 로직은 서버에 포함하지 않음
+  - 클라이언트가 각자의 로케일/타임존에 맞게 처리
+
 ## 개발 가이드라인
 
 ### 엔티티 클래스 (Server ↔ DBMS 경계)
@@ -445,11 +465,63 @@ books (1) ← (N) user_books
 - 데이터베이스 테이블을 객체로 매핑
 
 ### 컨트롤러 (Client ↔ Server 경계)
+
+#### 기본 원칙
 - 모든 컨트롤러는 `BaseV1Controller` 상속
 - 클라이언트 요청을 받아 `server.service`에 위임
 - `server.dto.clientserverDTO` 사용 (Request/Response)
 - Swagger 문서화 (`@Tag` 사용)
 - `ApiResponse<T>` 래퍼 사용
+
+#### 컨트롤러 설계 원칙 (SRP - Single Responsibility Principle)
+
+**핵심 원칙**: 컨트롤러는 **기능별(도메인/책임)로 분리**되어야 하며, 각 컨트롤러는 **하나의 주요 기능(도메인)에 집중**하여 **단일 책임 원칙(SRP)**을 준수해야 합니다.
+
+**원칙 1: 기능별(도메인) 분리**
+- 각 컨트롤러는 하나의 명확한 도메인 또는 기능 영역에만 집중해야 합니다
+- 예시:
+  - ✅ `BookSearchController`: 책 검색 및 도서 세부 정보 조회 (비인증)
+  - ✅ `BookShelfController`: 사용자 서재 관리 (인증 필요)
+  - ✅ `AuthController`: 인증 및 인가 관련 기능
+  - ❌ `BookController`: 책 검색과 서재 관리를 모두 포함 (책임이 혼재)
+
+**원칙 2: 단일 책임 원칙(SRP) 준수**
+- 각 컨트롤러는 자신의 명확한 역할만 수행해야 합니다
+- 하나의 컨트롤러가 여러 개의 서로 다른 책임을 가지면 안 됩니다
+- 예시:
+  - ✅ `BookSearchController`: 외부 API를 통한 책 검색만 담당
+  - ✅ `BookShelfController`: 사용자의 서재 관리만 담당
+  - ❌ 하나의 컨트롤러가 검색과 서재 관리를 모두 담당
+
+**원칙 3: 최소한의 서비스 의존**
+- 각 컨트롤러는 필요한 최소한의 서비스만 의존해야 합니다
+- 컨트롤러가 불필요한 서비스에 의존하면 결합도가 높아지고 유지보수가 어려워집니다
+- 예시:
+  - ✅ `BookSearchController`: `AladinApiService`만 의존
+  - ✅ `BookShelfController`: `BookService`만 의존
+  - ❌ 하나의 컨트롤러가 `AladinApiService`와 `BookService`를 모두 의존
+
+**원칙 4: 인증 요구사항별 분리 고려**
+- 인증이 필요한 기능과 비인증 기능은 별도 컨트롤러로 분리하는 것을 고려할 수 있습니다
+- 예시:
+  - `BookSearchController`: 비인증 접근 (공개 API)
+  - `BookShelfController`: 인증 필요 (사용자별 데이터)
+
+**원칙 5: 명확한 경로 구조**
+- 각 컨트롤러의 경로는 해당 도메인을 명확히 나타내야 합니다
+- 예시:
+  - `/api/v1/books/search` → `BookSearchController`
+  - `/api/v1/user/books` → `BookShelfController`
+
+**분리 예시: BookController 분리 계획**
+- **현재**: `BookController`가 책 검색과 서재 관리를 모두 담당
+- **분리 후**:
+  - `BookSearchController`: 책 검색(`/books/search`), 도서 세부 정보 조회(`/books/{isbn}`)
+    - 의존: `AladinApiService`만
+    - 인증: 불필요 (비인증)
+  - `BookShelfController`: 서재 관리(`/user/books/*`)
+    - 의존: `BookService`만
+    - 인증: 필요
 
 ### 서비스 (서버 내부)
 - 비즈니스 로직 구현

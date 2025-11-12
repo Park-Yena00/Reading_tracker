@@ -1,5 +1,6 @@
 package com.readingtracker.server.dto.clientserverDTO.responseDTO;
 
+import com.readingtracker.server.common.constant.BookSearchFilter;
 import java.time.LocalDate;
 import java.util.List;
 
@@ -13,17 +14,19 @@ public class BookSearchResponse {
     private Integer startIndex;
     private Integer itemsPerPage;
     private String query;
+    private BookSearchFilter searchFilter;
     
     // 기본 생성자
     public BookSearchResponse() {}
     
     // 생성자
-    public BookSearchResponse(List<BookInfo> books, Integer totalResults, Integer startIndex, Integer itemsPerPage, String query) {
+    public BookSearchResponse(List<BookInfo> books, Integer totalResults, Integer startIndex, Integer itemsPerPage, String query, BookSearchFilter searchFilter) {
         this.books = books;
         this.totalResults = totalResults;
         this.startIndex = startIndex;
         this.itemsPerPage = itemsPerPage;
         this.query = query;
+        this.searchFilter = searchFilter;
     }
     
     // Getters
@@ -32,6 +35,7 @@ public class BookSearchResponse {
     public Integer getStartIndex() { return startIndex; }
     public Integer getItemsPerPage() { return itemsPerPage; }
     public String getQuery() { return query; }
+    public BookSearchFilter getSearchFilter() { return searchFilter; }
     
     // Setters
     public void setBooks(List<BookInfo> books) { this.books = books; }
@@ -39,6 +43,7 @@ public class BookSearchResponse {
     public void setStartIndex(Integer startIndex) { this.startIndex = startIndex; }
     public void setItemsPerPage(Integer itemsPerPage) { this.itemsPerPage = itemsPerPage; }
     public void setQuery(String query) { this.query = query; }
+    public void setSearchFilter(BookSearchFilter searchFilter) { this.searchFilter = searchFilter; }
     
     /**
      * 책 정보 DTO

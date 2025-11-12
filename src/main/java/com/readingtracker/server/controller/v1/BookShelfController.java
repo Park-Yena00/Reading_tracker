@@ -1,19 +1,16 @@
 package com.readingtracker.server.controller.v1;
 
 import com.readingtracker.server.common.constant.BookCategory;
-import com.readingtracker.server.common.constant.BookSearchFilter;
 import com.readingtracker.server.common.constant.BookSortCriteria;
 import com.readingtracker.server.dto.ApiResponse;
 import com.readingtracker.server.dto.clientserverDTO.requestDTO.BookAdditionRequest;
 import com.readingtracker.server.dto.clientserverDTO.requestDTO.BookDetailUpdateRequest;
-import com.readingtracker.server.dto.clientserverDTO.requestDTO.BookSearchRequest;
+import com.readingtracker.server.dto.clientserverDTO.requestDTO.StartReadingRequest;
+import com.readingtracker.server.dto.clientserverDTO.requestDTO.FinishReadingRequest;
 import com.readingtracker.server.dto.clientserverDTO.responseDTO.BookAdditionResponse;
-import com.readingtracker.server.dto.clientserverDTO.responseDTO.BookDetailResponse;
-import com.readingtracker.server.dto.clientserverDTO.responseDTO.BookSearchResponse;
 import com.readingtracker.server.dto.clientserverDTO.responseDTO.MyShelfResponse;
 import com.readingtracker.dbms.entity.Book;
 import com.readingtracker.dbms.entity.UserShelfBook;
-import com.readingtracker.server.service.AladinApiService;
 import com.readingtracker.server.service.BookService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -31,61 +28,11 @@ import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api/v1")
-@Tag(name = "책 관리", description = "책 검색 및 내 서재 관리 API")
-public class BookController extends BaseV1Controller {
-    
-    @Autowired
-    private AladinApiService aladinApiService;
+@Tag(name = "내 서재 관리", description = "사용자 서재 관리 API")
+public class BookShelfController extends BaseV1Controller {
     
     @Autowired
     private BookService bookService;
-    
-    /**
-     * 책 검색 (비인증)
-     * GET /api/v1/books/search
-     */
-    @GetMapping("/books/search")
-    @Operation(
-        summary = "책 검색", 
-        description = "알라딘 Open API를 통해 책을 검색합니다 (비인증 접근 가능)"
-    )
-    public ApiResponse<BookSearchResponse> searchBooks(
-            @Parameter(description = "검색어", required = true)
-            @RequestParam String query,
-            @Parameter(description = "검색 필터 (TITLE: 도서명, AUTHOR: 저자명, PUBLISHER: 출판사명)")
-            @RequestParam(defaultValue = "TITLE") BookSearchFilter queryType,
-            @Parameter(description = "시작 페이지")
-            @RequestParam(defaultValue = "1") Integer start,
-            @Parameter(description = "페이지당 결과 수 (최대 50)")
-            @RequestParam(defaultValue = "10") Integer maxResults) {
-        
-        BookSearchRequest request = new BookSearchRequest();
-        request.setQuery(query);
-        request.setQueryType(queryType);
-        request.setStart(start);
-        request.setMaxResults(maxResults);
-        BookSearchResponse response = aladinApiService.searchBooks(request);
-        
-        return ApiResponse.success(response);
-    }
-    
-    /**
-     * 도서 세부 정보 검색 (비인증)
-     * GET /api/v1/books/{isbn}
-     */
-    @GetMapping("/books/{isbn}")
-    @Operation(
-        summary = "도서 세부 정보 검색",
-        description = "ISBN을 통해 알라딘 Open API에서 도서의 상세 정보를 조회합니다 (비인증 접근 가능)"
-    )
-    public ApiResponse<BookDetailResponse> getBookDetail(
-            @Parameter(description = "도서 ISBN", required = true)
-            @PathVariable String isbn) {
-        
-        BookDetailResponse response = aladinApiService.getBookDetail(isbn);
-        
-        return ApiResponse.success(response);
-    }
     
     /**
      * 내 서재에 책 추가 (인증 필요)
@@ -202,6 +149,48 @@ public class BookController extends BaseV1Controller {
     }
     
     /**
+     * 책 읽기 시작 (ToRead → Reading)
+     */
+    @PostMapping("/user/books/{userBookId}/start-reading")
+    @Operation(
+        summary = "책 읽기 시작",
+        description = "ToRead 상태의 책을 읽기 시작합니다. 독서 시작일과 진행률(페이지 수)을 입력받아 Reading 상태로 변경합니다.",
+        security = @SecurityRequirement(name = "bearerAuth")
+    )
+    public ApiResponse<String> startReading(
+            @Parameter(description = "사용자 책 ID", required = true)
+            @PathVariable Long userBookId,
+            @Valid @RequestBody StartReadingRequest request) {
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        String loginId = (String) authentication.getPrincipal();
+        
+        bookService.startReading(loginId, userBookId, request);
+        
+        return ApiResponse.success("책 읽기를 시작했습니다.");
+    }
+    
+    /**
+     * 책 완독 (AlmostFinished → Finished)
+     */
+    @PostMapping("/user/books/{userBookId}/finish-reading")
+    @Operation(
+        summary = "책 완독",
+        description = "AlmostFinished 상태의 책을 완독 처리합니다. 독서 종료일과 평점을 입력받아 Finished 상태로 변경합니다.",
+        security = @SecurityRequirement(name = "bearerAuth")
+    )
+    public ApiResponse<String> finishReading(
+            @Parameter(description = "사용자 책 ID", required = true)
+            @PathVariable Long userBookId,
+            @Valid @RequestBody FinishReadingRequest request) {
+        Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
+        String loginId = (String) authentication.getPrincipal();
+        
+        bookService.finishReading(loginId, userBookId, request);
+        
+        return ApiResponse.success("책이 완독 처리되었습니다.");
+    }
+    
+    /**
      * 책 상세 정보 변경 (인증 필요)
      * PUT /api/v1/user/books/{userBookId}
      */
@@ -257,3 +246,4 @@ public class BookController extends BaseV1Controller {
         return shelfBook;
     }
 }
+
