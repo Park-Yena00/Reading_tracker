@@ -1,25 +1,23 @@
 package com.readingtracker.server.service;
 
 import com.readingtracker.server.common.constant.ErrorCode;
-import com.readingtracker.dbms.dto.serverdbmsDTO.commandDTO.AccountVerificationCommand;
-import com.readingtracker.dbms.dto.serverdbmsDTO.commandDTO.LoginCommand;
-import com.readingtracker.dbms.dto.serverdbmsDTO.commandDTO.LoginIdRetrievalCommandDTO;
-import com.readingtracker.dbms.dto.serverdbmsDTO.commandDTO.PasswordResetCommand;
-import com.readingtracker.dbms.dto.serverdbmsDTO.commandDTO.UserCreationCommand;
-import com.readingtracker.dbms.dto.serverdbmsDTO.resultDTO.LoginIdRetrievalResult;
-import com.readingtracker.dbms.dto.serverdbmsDTO.resultDTO.UserResult;
 import com.readingtracker.dbms.entity.PasswordResetToken;
 import com.readingtracker.dbms.entity.User;
 import com.readingtracker.dbms.repository.PasswordResetTokenRepository;
 import com.readingtracker.dbms.repository.UserRepository;
 import com.readingtracker.server.common.util.PasswordValidator;
+import com.readingtracker.server.dto.requestDTO.AccountVerificationRequest;
+import com.readingtracker.server.dto.requestDTO.LoginIdRetrievalRequest;
+import com.readingtracker.server.dto.requestDTO.LoginRequest;
+import com.readingtracker.server.dto.requestDTO.PasswordResetRequest;
+import com.readingtracker.server.dto.requestDTO.RegistrationRequest;
+
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
-import java.util.Optional;
 import java.util.UUID;
 
 @Service
@@ -39,47 +37,43 @@ public class AuthService {
     private JwtService jwtService;
     
     @Autowired
-    private UserDeviceService userDeviceService;
-    
-    @Autowired
     private PasswordResetTokenRepository passwordResetTokenRepository;
     
     /**
      * 회원가입 - Controller에서 호출
-     * @param command 사용자 생성 명령 (Command DTO)
-     * @return 생성된 사용자 정보 DTO
+     * @param request 회원가입 요청 DTO
+     * @return 생성된 사용자 Entity
      */
-    public UserResult register(UserCreationCommand command) {
-        User user = executeRegister(command);
-        return toUserResult(user);
+    public User register(RegistrationRequest request) {
+        return executeRegister(request);
     }
     
     /**
-     * 회원가입 실행 - Command DTO 사용
-     * @param command 사용자 생성 명령 (Command DTO)
+     * 회원가입 실행 - Request DTO 사용
+     * @param request 회원가입 요청 DTO
      * @return 생성된 사용자 엔티티
      */
-    private User executeRegister(UserCreationCommand command) {
+    private User executeRegister(RegistrationRequest request) {
         // 1. 중복 확인
-        if (userRepository.existsByLoginId(command.getLoginId())) {
+        if (userRepository.existsByLoginId(request.getLoginId())) {
             throw new IllegalArgumentException(ErrorCode.DUPLICATE_LOGIN_ID.getMessage());
         }
         
-        if (userRepository.existsByEmail(command.getEmail())) {
+        if (userRepository.existsByEmail(request.getEmail())) {
             throw new IllegalArgumentException(ErrorCode.DUPLICATE_EMAIL.getMessage());
         }
         
         // 2. 비밀번호 검증
-        passwordValidator.validate(command.getPassword());
+        passwordValidator.validate(request.getPassword());
         
         // 3. 비밀번호 암호화
-        String encodedPassword = passwordEncoder.encode(command.getPassword());
+        String encodedPassword = passwordEncoder.encode(request.getPassword());
         
         // 4. 사용자 생성
         User user = new User(
-            command.getLoginId(),
-            command.getEmail(),
-            command.getName(),
+            request.getLoginId(),
+            request.getEmail(),
+            request.getName(),
             encodedPassword
         );
         
@@ -89,21 +83,21 @@ public class AuthService {
     
     /**
      * 로그인 - Controller에서 호출
-     * @param command 로그인 명령 (Command DTO)
-     * @return 로그인 결과 (토큰 정보 포함)
+     * @param request 로그인 요청 DTO
+     * @return 로그인 결과 (토큰 정보 및 사용자 Entity 포함)
      */
-    public LoginResult login(LoginCommand command) {
-        return executeLogin(command);
+    public LoginResult login(LoginRequest request) {
+        return executeLogin(request);
     }
     
     /**
-     * 로그인 실행 - Command DTO 사용
-     * @param command 로그인 명령 (Command DTO)
-     * @return 로그인 결과 (토큰 정보 포함)
+     * 로그인 실행 - Request DTO 사용
+     * @param request 로그인 요청 DTO
+     * @return 로그인 결과 (토큰 정보 및 사용자 Entity 포함)
      */
-    private LoginResult executeLogin(LoginCommand command) {
+    private LoginResult executeLogin(LoginRequest request) {
         // 1. 사용자 조회 (loginId만 허용)
-        User user = userRepository.findByLoginId(command.getLoginId())
+        User user = userRepository.findByLoginId(request.getLoginId())
             .orElseThrow(() -> new IllegalArgumentException(ErrorCode.USER_NOT_FOUND.getMessage()));
         
         // 2. 계정 상태 확인
@@ -116,7 +110,7 @@ public class AuthService {
         }
         
         // 3. 비밀번호 확인
-        if (!passwordEncoder.matches(command.getPassword(), user.getPasswordHash())) {
+        if (!passwordEncoder.matches(request.getPassword(), user.getPasswordHash())) {
             // 로그인 실패 횟수 증가
             user.setFailedLoginCount(user.getFailedLoginCount() + 1);
             
@@ -142,31 +136,26 @@ public class AuthService {
             null   // platform - "WEB"
         );
         
-        // 6. User Entity를 UserResult DTO로 변환
-        UserResult userResult = toUserResult(user);
-        
-        return new LoginResult(tokenResult.getAccessToken(), tokenResult.getRefreshToken(), userResult);
+        return new LoginResult(tokenResult.getAccessToken(), tokenResult.getRefreshToken(), user);
     }
     
     /**
      * 아이디 찾기 - Controller에서 호출
-     * @param command 아이디 찾기 명령 (Command DTO)
-     * @return 사용자 정보 DTO
+     * @param request 아이디 찾기 요청 DTO
+     * @return 사용자 Entity
      */
-    public LoginIdRetrievalResult findLoginIdByEmailAndName(LoginIdRetrievalCommandDTO command) {
-        User user = executeFindLoginId(command);
-        // User Entity를 FindLoginIdResult DTO로 변환
-        return new LoginIdRetrievalResult(user.getLoginId(), user.getEmail());
+    public User findLoginIdByEmailAndName(LoginIdRetrievalRequest request) {
+        return executeFindLoginId(request);
     }
     
     /**
-     * 아이디 찾기 실행 - Command DTO 사용
-     * @param command 아이디 찾기 명령 (Command DTO)
+     * 아이디 찾기 실행 - Request DTO 사용
+     * @param request 아이디 찾기 요청 DTO
      * @return 사용자 엔티티
      */
-    private User executeFindLoginId(LoginIdRetrievalCommandDTO command) {
+    private User executeFindLoginId(LoginIdRetrievalRequest request) {
         // 이메일 + 이름으로 활성 사용자 조회 (둘 다 일치해야 함)
-        User user = userRepository.findActiveUserByEmailAndName(command.getEmail(), command.getName())
+        User user = userRepository.findActiveUserByEmailAndName(request.getEmail(), request.getName())
             .orElseThrow(() -> new IllegalArgumentException("존재하지 않는 계정입니다."));
         
         return user;
@@ -174,21 +163,21 @@ public class AuthService {
     
     /**
      * Step 1: 계정 확인 및 재설정 토큰 발급 - Controller에서 호출
-     * @param command 계정 확인 명령 (Command DTO)
+     * @param request 계정 확인 요청 DTO
      * @return 재설정 토큰
      */
-    public String verifyAccountForPasswordReset(AccountVerificationCommand command) {
-        return executeVerifyAccount(command);
+    public String verifyAccountForPasswordReset(AccountVerificationRequest request) {
+        return executeVerifyAccount(request);
     }
     
     /**
-     * 계정 확인 실행 - Command DTO 사용
-     * @param command 계정 확인 명령 (Command DTO)
+     * 계정 확인 실행 - Request DTO 사용
+     * @param request 계정 확인 요청 DTO
      * @return 재설정 토큰
      */
-    private String executeVerifyAccount(AccountVerificationCommand command) {
+    private String executeVerifyAccount(AccountVerificationRequest request) {
         // 1. loginId + email로 활성 사용자 조회 (둘 다 일치해야 함)
-        User user = userRepository.findActiveUserByLoginIdAndEmail(command.getLoginId(), command.getEmail())
+        User user = userRepository.findActiveUserByLoginIdAndEmail(request.getLoginId(), request.getEmail())
             .orElseThrow(() -> new IllegalArgumentException("존재하지 않는 계정입니다."));
         
         // 2. 기존 토큰 삭제 (같은 사용자의 이전 재설정 토큰)
@@ -209,23 +198,22 @@ public class AuthService {
     
     /**
      * Step 2: 비밀번호 변경 - Controller에서 호출
-     * @param command 비밀번호 재설정 명령 (Command DTO)
-     * @return 변경된 사용자 정보 DTO
+     * @param request 비밀번호 재설정 요청 DTO
+     * @return 변경된 사용자 Entity
      */
-    public UserResult resetPassword(PasswordResetCommand command) {
-        User user = executeResetPassword(command);
-        return toUserResult(user);
+    public User resetPassword(PasswordResetRequest request) {
+        return executeResetPassword(request);
     }
     
     /**
-     * 비밀번호 변경 실행 - Command DTO 사용
-     * @param command 비밀번호 재설정 명령 (Command DTO)
-     * @return 변경된 사용자 정보
+     * 비밀번호 변경 실행 - Request DTO 사용
+     * @param request 비밀번호 재설정 요청 DTO
+     * @return 변경된 사용자 Entity
      */
-    private User executeResetPassword(PasswordResetCommand command) {
+    private User executeResetPassword(PasswordResetRequest request) {
         // 1. 토큰 검증
         PasswordResetToken resetToken = passwordResetTokenRepository
-            .findValidToken(command.getResetToken(), LocalDateTime.now())
+            .findValidToken(request.getResetToken(), LocalDateTime.now())
             .orElseThrow(() -> new IllegalArgumentException("유효하지 않거나 만료된 토큰입니다."));
         
         // 2. 토큰으로 사용자 조회
@@ -238,20 +226,20 @@ public class AuthService {
         }
         
         // 4. 새 비밀번호와 확인 비밀번호 일치 검증
-        if (!command.getNewPassword().equals(command.getConfirmPassword())) {
+        if (!request.getNewPassword().equals(request.getConfirmPassword())) {
             throw new IllegalArgumentException("새 비밀번호와 확인 비밀번호가 일치하지 않습니다.");
         }
         
         // 5. 새 비밀번호 강도 검증
-        passwordValidator.validate(command.getNewPassword());
+        passwordValidator.validate(request.getNewPassword());
         
         // 6. 기존 비밀번호와 동일한지 확인
-        if (passwordEncoder.matches(command.getNewPassword(), user.getPasswordHash())) {
+        if (passwordEncoder.matches(request.getNewPassword(), user.getPasswordHash())) {
             throw new IllegalArgumentException("기존 비밀번호와 동일합니다.");
         }
         
         // 7. 새 비밀번호 암호화 및 저장
-        String newPasswordHash = passwordEncoder.encode(command.getNewPassword());
+        String newPasswordHash = passwordEncoder.encode(request.getNewPassword());
         user.setPasswordHash(newPasswordHash);
         
         // 8. 토큰 사용 처리 (재사용 방지)
@@ -277,9 +265,9 @@ public class AuthService {
     public static class LoginResult {
         private String accessToken;
         private String refreshToken;
-        private UserResult user;
+        private User user;
         
-        public LoginResult(String accessToken, String refreshToken, UserResult user) {
+        public LoginResult(String accessToken, String refreshToken, User user) {
             this.accessToken = accessToken;
             this.refreshToken = refreshToken;
             this.user = user;
@@ -287,24 +275,7 @@ public class AuthService {
         
         public String getAccessToken() { return accessToken; }
         public String getRefreshToken() { return refreshToken; }
-        public UserResult getUser() { return user; }
-    }
-    
-    // ==================== Entity → DTO 변환 헬퍼 메서드 ====================
-    
-    /**
-     * User Entity를 UserResult DTO로 변환
-     */
-    private UserResult toUserResult(User user) {
-        return new UserResult(
-            user.getId(),
-            user.getLoginId(),
-            user.getEmail(),
-            user.getName(),
-            user.getRole(),
-            user.getStatus(),
-            user.getCreatedAt()
-        );
+        public User getUser() { return user; }
     }
 
 }

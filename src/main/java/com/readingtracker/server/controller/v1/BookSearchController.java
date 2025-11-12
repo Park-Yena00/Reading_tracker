@@ -2,9 +2,9 @@ package com.readingtracker.server.controller.v1;
 
 import com.readingtracker.server.common.constant.BookSearchFilter;
 import com.readingtracker.server.dto.ApiResponse;
-import com.readingtracker.server.dto.clientserverDTO.requestDTO.BookSearchRequest;
-import com.readingtracker.server.dto.clientserverDTO.responseDTO.BookDetailResponse;
-import com.readingtracker.server.dto.clientserverDTO.responseDTO.BookSearchResponse;
+import com.readingtracker.server.dto.requestDTO.BookSearchRequest;
+import com.readingtracker.server.dto.responseDTO.BookDetailResponse;
+import com.readingtracker.server.dto.responseDTO.BookSearchResponse;
 import com.readingtracker.server.service.AladinApiService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -39,11 +39,18 @@ public class BookSearchController extends BaseV1Controller {
             @Parameter(description = "페이지당 결과 수 (최대 50)")
             @RequestParam(defaultValue = "10") Integer maxResults) {
         
+        // BookSearchRequest 생성 및 검증
         BookSearchRequest request = new BookSearchRequest();
         request.setQuery(query);
         request.setQueryType(queryType);
         request.setStart(start);
         request.setMaxResults(maxResults);
+        
+        // 검증 수행 (@Valid는 @ModelAttribute와 함께 사용하거나 수동 검증 필요)
+        // GET 요청이므로 @ModelAttribute 대신 수동으로 검증하거나 Validator 사용
+        // 여기서는 간단하게 DTO 생성 후 Service 호출
+        // 실제 검증은 Service 계층에서 처리하거나 별도 Validator 사용 가능
+        
         BookSearchResponse response = aladinApiService.searchBooks(request);
         
         return ApiResponse.success(response);

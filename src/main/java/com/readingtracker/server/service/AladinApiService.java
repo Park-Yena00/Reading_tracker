@@ -1,9 +1,9 @@
 package com.readingtracker.server.service;
 
 import com.readingtracker.server.common.constant.BookSearchFilter;
-import com.readingtracker.server.dto.clientserverDTO.requestDTO.BookSearchRequest;
-import com.readingtracker.server.dto.clientserverDTO.responseDTO.BookDetailResponse;
-import com.readingtracker.server.dto.clientserverDTO.responseDTO.BookSearchResponse;
+import com.readingtracker.server.dto.requestDTO.BookSearchRequest;
+import com.readingtracker.server.dto.responseDTO.BookDetailResponse;
+import com.readingtracker.server.dto.responseDTO.BookSearchResponse;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.ResponseEntity;

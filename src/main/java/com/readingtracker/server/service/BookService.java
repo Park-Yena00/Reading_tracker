@@ -2,16 +2,10 @@ package com.readingtracker.server.service;
 
 import com.readingtracker.server.common.constant.BookCategory;
 import com.readingtracker.server.common.constant.BookSortCriteria;
-import com.readingtracker.server.dto.clientserverDTO.requestDTO.BookAdditionRequest;
-import com.readingtracker.server.dto.clientserverDTO.requestDTO.BookDetailUpdateRequest;
-import com.readingtracker.server.dto.clientserverDTO.requestDTO.StartReadingRequest;
-import com.readingtracker.server.dto.clientserverDTO.requestDTO.FinishReadingRequest;
 import com.readingtracker.dbms.entity.Book;
-import com.readingtracker.dbms.entity.User;
 import com.readingtracker.dbms.entity.UserShelfBook;
 import com.readingtracker.dbms.repository.BookRepository;
 import com.readingtracker.dbms.repository.UserShelfBookRepository;
-import com.readingtracker.dbms.repository.UserRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -31,149 +25,122 @@ public class BookService {
     @Autowired
     private UserShelfBookRepository userBookRepository;
     
-    @Autowired
-    private UserRepository userRepository;
-    
     /**
      * 내 서재에 책 추가
+     * Book과 UserShelfBook Entity를 받아서 처리
      */
-    public UserShelfBook addBookToShelf(String loginId, BookAdditionRequest request) {
-        // 1. 사용자 조회
-        User user = userRepository.findActiveUserByLoginId(loginId)
-            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
-        
-        // 2. ISBN으로 Book 테이블에 이미 존재하는지 확인
-        if (bookRepository.existsByIsbn(request.getIsbn())) {
+    public UserShelfBook addBookToShelf(Book book, UserShelfBook userShelfBook) {
+        // 1. ISBN으로 Book 테이블에 이미 존재하는지 확인
+        if (book.getId() == null && bookRepository.existsByIsbn(book.getIsbn())) {
             throw new IllegalArgumentException("이미 Book 테이블에 존재하는 ISBN입니다. 직접 등록할 수 없습니다.");
         }
         
-        // 3. 직접 입력한 정보로 Book 생성 (알라딘 API 호출 없음)
-        Book book = createBookFromRequest(request);
+        // 2. Book 저장 (새로운 Book인 경우)
+        Book savedBook = book;
+        if (book.getId() == null) {
+            savedBook = bookRepository.save(book);
+        }
+        
+        // 3. UserShelfBook에 Book 설정
+        userShelfBook.setBook(savedBook);
         
         // 4. 중복 추가 방지 체크
-        Optional<UserShelfBook> existingBook = userBookRepository.findByUserIdAndBookId(user.getId(), book.getId());
+        Optional<UserShelfBook> existingBook = userBookRepository.findByUserIdAndBookId(
+            userShelfBook.getUserId(), savedBook.getId());
         if (existingBook.isPresent()) {
             throw new IllegalArgumentException("이미 내 서재에 추가된 책입니다.");
         }
         
-        // 5. UserBook 생성 및 카테고리별 입력값 설정
-        UserShelfBook userBook = new UserShelfBook(user, book, request.getCategory());
-        // 명시적으로 카테고리를 선택했으므로 플래그 설정
-        userBook.setCategoryManuallySet(true);
-        setCategorySpecificFields(userBook, request);
+        // 5. 카테고리별 입력값 검증
+        validateCategorySpecificFields(userShelfBook);
         
-        return userBookRepository.save(userBook);
+        // 6. UserShelfBook 저장
+        return userBookRepository.save(userShelfBook);
     }
     
     /**
-     * 카테고리별 입력값 설정
+     * 카테고리별 입력값 검증
      */
-    private void setCategorySpecificFields(UserShelfBook userBook, BookAdditionRequest request) {
-        BookCategory category = request.getCategory();
+    private void validateCategorySpecificFields(UserShelfBook userBook) {
+        BookCategory category = userBook.getCategory();
         
         switch (category) {
             case ToRead:
-                // 기대평 (선택사항)
-                if (request.getExpectation() != null && !request.getExpectation().trim().isEmpty()) {
-                    if (request.getExpectation().length() > 500) {
-                        throw new IllegalArgumentException("기대평은 500자 이하여야 합니다.");
-                    }
-                    userBook.setExpectation(request.getExpectation());
+                // 기대평 (선택사항) - 길이 검증만
+                if (userBook.getExpectation() != null && userBook.getExpectation().length() > 500) {
+                    throw new IllegalArgumentException("기대평은 500자 이하여야 합니다.");
                 }
-                //다른 필드들은 자동으로 무시됨
                 break;
                 
             case Reading:
                 // 독서 시작일 (필수)
-                if (request.getReadingStartDate() == null) {
+                if (userBook.getReadingStartDate() == null) {
                     throw new IllegalArgumentException("독서 시작일은 필수 입력 항목입니다.");
                 }
-                userBook.setReadingStartDate(request.getReadingStartDate());
                 
                 // 현재 읽은 페이지 수 (필수)
-                if (request.getReadingProgress() == null) {
+                if (userBook.getReadingProgress() == null) {
                     throw new IllegalArgumentException("현재 읽은 페이지 수는 필수 입력 항목입니다.");
                 }
                 // 전체 페이지 수와 비교 검증
-                Integer totalPages = userBook.getBook().getTotalPages();
-                if (totalPages != null && request.getReadingProgress() > totalPages) {
+                Integer totalPages = userBook.getBook() != null ? userBook.getBook().getTotalPages() : null;
+                if (totalPages != null && userBook.getReadingProgress() > totalPages) {
                     throw new IllegalArgumentException("읽은 페이지 수는 전체 페이지 수(" + totalPages + ")를 초과할 수 없습니다.");
                 }
-                if (request.getReadingProgress() < 0) {
+                if (userBook.getReadingProgress() < 0) {
                     throw new IllegalArgumentException("읽은 페이지 수는 0 이상이어야 합니다.");
-                }
-                userBook.setReadingProgress(request.getReadingProgress());
-                
-                // 구매/대여 여부 (선택사항)
-                if (request.getPurchaseType() != null) {
-                    userBook.setPurchaseType(request.getPurchaseType());
                 }
                 break;
                 
             case AlmostFinished:
                 // 독서 시작일 (필수)
-                if (request.getReadingStartDate() == null) {
+                if (userBook.getReadingStartDate() == null) {
                     throw new IllegalArgumentException("독서 시작일은 필수 입력 항목입니다.");
                 }
-                userBook.setReadingStartDate(request.getReadingStartDate());
                 
                 // 현재 읽은 페이지 수 (필수)
-                if (request.getReadingProgress() == null) {
+                if (userBook.getReadingProgress() == null) {
                     throw new IllegalArgumentException("현재 읽은 페이지 수는 필수 입력 항목입니다.");
                 }
                 // 전체 페이지 수와 비교 검증
-                Integer totalPages2 = userBook.getBook().getTotalPages();
-                if (totalPages2 != null && request.getReadingProgress() > totalPages2) {
+                Integer totalPages2 = userBook.getBook() != null ? userBook.getBook().getTotalPages() : null;
+                if (totalPages2 != null && userBook.getReadingProgress() > totalPages2) {
                     throw new IllegalArgumentException("읽은 페이지 수는 전체 페이지 수(" + totalPages2 + ")를 초과할 수 없습니다.");
                 }
-                if (request.getReadingProgress() < 0) {
+                if (userBook.getReadingProgress() < 0) {
                     throw new IllegalArgumentException("읽은 페이지 수는 0 이상이어야 합니다.");
                 }
-                userBook.setReadingProgress(request.getReadingProgress());
                 break;
                 
             case Finished:
                 // 독서 시작일 (필수)
-                if (request.getReadingStartDate() == null) {
+                if (userBook.getReadingStartDate() == null) {
                     throw new IllegalArgumentException("독서 시작일은 필수 입력 항목입니다.");
                 }
-                userBook.setReadingStartDate(request.getReadingStartDate());
                 
                 // 독서 종료일 (필수)
-                if (request.getReadingFinishedDate() == null) {
+                if (userBook.getReadingFinishedDate() == null) {
                     throw new IllegalArgumentException("독서 종료일은 필수 입력 항목입니다.");
                 }
                 // 독서 종료일이 독서 시작일 이후인지 검증
-                if (request.getReadingFinishedDate().isBefore(request.getReadingStartDate())) {
+                if (userBook.getReadingFinishedDate().isBefore(userBook.getReadingStartDate())) {
                     throw new IllegalArgumentException("독서 종료일은 독서 시작일 이후여야 합니다.");
                 }
-                userBook.setReadingFinishedDate(request.getReadingFinishedDate());
                 
                 // 진행률 자동 설정: Finished 카테고리는 항상 100% (전체 페이지 수)
-                Integer bookTotalPages = userBook.getBook().getTotalPages();
+                Integer bookTotalPages = userBook.getBook() != null ? userBook.getBook().getTotalPages() : null;
                 if (bookTotalPages != null && bookTotalPages > 0) {
                     userBook.setReadingProgress(bookTotalPages);  // 전체 페이지 수 = 100%
-                } else {
-                    // 전체 페이지 수가 없는 경우, 사용자가 직접 입력한 진행률 값이 있으면 사용
-                    if (request.getReadingProgress() != null) {
-                        userBook.setReadingProgress(request.getReadingProgress());
-                    } else {
-                        throw new IllegalArgumentException("Finished 카테고리에는 전체 페이지 수 또는 진행률이 필요합니다.");
-                    }
+                } else if (userBook.getReadingProgress() == null) {
+                    throw new IllegalArgumentException("Finished 카테고리에는 전체 페이지 수 또는 진행률이 필요합니다.");
                 }
                 
                 // 평점 (필수, 1~5)
-                if (request.getRating() == null) {
+                if (userBook.getRating() == null) {
                     throw new IllegalArgumentException("평점은 필수 입력 항목입니다.");
                 }
-                if (request.getRating() < 1 || request.getRating() > 5) {
+                if (userBook.getRating() < 1 || userBook.getRating() > 5) {
                     throw new IllegalArgumentException("평점은 1 이상 5 이하여야 합니다.");
-                }
-                userBook.setRating(request.getRating());
-                
-                // 후기 (선택사항)
-                if (request.getReview() != null && !request.getReview().trim().isEmpty()) {
-                    userBook.setReview(request.getReview());
                 }
                 break;
         }
@@ -181,26 +148,16 @@ public class BookService {
     
     /**
      * 책 완독 처리 (AlmostFinished → Finished)
+     * UserShelfBook Entity를 받아서 처리
      */
-    public UserShelfBook finishReading(String loginId, Long userBookId, FinishReadingRequest request) {
-        // 1. 사용자 조회
-        User user = userRepository.findActiveUserByLoginId(loginId)
-            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
-        
-        // 2. UserBook 조회 및 소유권 확인
-        UserShelfBook userBook = userBookRepository.findById(userBookId)
-            .orElseThrow(() -> new IllegalArgumentException("책을 찾을 수 없습니다."));
-        
-        if (!userBook.getUserId().equals(user.getId())) {
-            throw new IllegalArgumentException("권한이 없습니다.");
-        }
-        
+    public UserShelfBook finishReading(UserShelfBook userBook) {
+        // 1. UserBook 조회 및 소유권 확인 (이미 조회된 Entity 사용)
         BookCategory currentCategory = userBook.getCategory();
         if (currentCategory != BookCategory.Reading && currentCategory != BookCategory.AlmostFinished) {
             throw new IllegalArgumentException("현재 책 상태에서는 '완독' 처리를 할 수 없습니다.");
         }
         
-        LocalDate readingFinishedDate = request.getReadingFinishedDate();
+        LocalDate readingFinishedDate = userBook.getReadingFinishedDate();
         if (readingFinishedDate == null) {
             throw new IllegalArgumentException("독서 종료일은 필수 입력 항목입니다.");
         }
@@ -218,11 +175,16 @@ public class BookService {
             userBook.setReadingProgress(0);
         }
         
+        // 평점 검증
+        if (userBook.getRating() == null) {
+            throw new IllegalArgumentException("평점은 필수 입력 항목입니다.");
+        }
+        if (userBook.getRating() < 1 || userBook.getRating() > 5) {
+            throw new IllegalArgumentException("평점은 1 이상 5 이하여야 합니다.");
+        }
+        
         userBook.setCategory(BookCategory.Finished);
         userBook.setCategoryManuallySet(true);
-        userBook.setReadingFinishedDate(readingFinishedDate);
-        userBook.setRating(request.getRating());
-        userBook.setReview(request.getReview());
         userBook.setUpdatedAt(LocalDateTime.now());
         
         return userBookRepository.save(userBook);
@@ -230,23 +192,20 @@ public class BookService {
     
     /**
      * 내 서재 조회
+     * userId를 받아서 처리
      */
     @Transactional(readOnly = true)
-    public List<UserShelfBook> getMyShelf(String loginId, BookCategory category, BookSortCriteria sortBy) {
-        // 1. 사용자 조회
-        User user = userRepository.findActiveUserByLoginId(loginId)
-            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
-        
-        // 2. 정렬 기준이 지정되지 않은 경우 기본값은 도서명 오름차순
+    public List<UserShelfBook> getMyShelf(Long userId, BookCategory category, BookSortCriteria sortBy) {
+        // 1. 정렬 기준이 지정되지 않은 경우 기본값은 도서명 오름차순
         if (sortBy == null) {
             sortBy = BookSortCriteria.TITLE;
         }
         
-        // 3. 카테고리와 정렬 기준에 따라 내 서재 조회
+        // 2. 카테고리와 정렬 기준에 따라 내 서재 조회
         if (category != null) {
-            return getMyShelfByCategoryAndSort(user.getId(), category, sortBy);
+            return getMyShelfByCategoryAndSort(userId, category, sortBy);
         } else {
-            return getMyShelfBySort(user.getId(), sortBy);
+            return getMyShelfBySort(userId, sortBy);
         }
     }
     
@@ -288,41 +247,21 @@ public class BookService {
     
     /**
      * 내 서재에서 책 제거
+     * UserShelfBook Entity를 받아서 처리
      */
-    public void removeBookFromShelf(String loginId, Long userBookId) {
-        // 1. 사용자 조회
-        User user = userRepository.findActiveUserByLoginId(loginId)
-            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
-        
-        // 2. UserBook 조회 및 소유권 확인
-        UserShelfBook userBook = userBookRepository.findById(userBookId)
-            .orElseThrow(() -> new IllegalArgumentException("책을 찾을 수 없습니다."));
-        
-        if (!userBook.getUserId().equals(user.getId())) {
-            throw new IllegalArgumentException("권한이 없습니다.");
-        }
-        
-        // 3. 삭제
+    public void removeBookFromShelf(UserShelfBook userBook) {
+        // 소유권 확인은 Controller에서 이미 완료된 것으로 가정
+        // Entity만 받아서 삭제 처리
         userBookRepository.delete(userBook);
     }
     
     /**
      * 책 읽기 상태 변경
+     * UserShelfBook Entity를 받아서 처리
      */
-    public void updateBookCategory(String loginId, Long userBookId, BookCategory category) {
-        // 1. 사용자 조회
-        User user = userRepository.findActiveUserByLoginId(loginId)
-            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
-        
-        // 2. UserBook 조회 및 소유권 확인
-        UserShelfBook userBook = userBookRepository.findById(userBookId)
-            .orElseThrow(() -> new IllegalArgumentException("책을 찾을 수 없습니다."));
-        
-        if (!userBook.getUserId().equals(user.getId())) {
-            throw new IllegalArgumentException("권한이 없습니다.");
-        }
-        
-        // 3. 카테고리 변경
+    public void updateBookCategory(UserShelfBook userBook, BookCategory category) {
+        // 소유권 확인은 Controller에서 이미 완료된 것으로 가정
+        // Entity만 받아서 카테고리 변경 처리
         userBook.setCategory(category);
         userBook.setUpdatedAt(LocalDateTime.now());
         
@@ -331,26 +270,17 @@ public class BookService {
     
     /**
      * 책 읽기 시작 (ToRead → Reading)
+     * UserShelfBook Entity를 받아서 처리
      */
-    public UserShelfBook startReading(String loginId, Long userBookId, StartReadingRequest request) {
-        // 1. 사용자 조회
-        User user = userRepository.findActiveUserByLoginId(loginId)
-            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
-        
-        // 2. UserBook 조회 및 소유권 확인
-        UserShelfBook userBook = userBookRepository.findById(userBookId)
-            .orElseThrow(() -> new IllegalArgumentException("책을 찾을 수 없습니다."));
-        
-        if (!userBook.getUserId().equals(user.getId())) {
-            throw new IllegalArgumentException("권한이 없습니다.");
-        }
-        
+    public UserShelfBook startReading(UserShelfBook userBook) {
+        // 1. 카테고리 확인
         if (userBook.getCategory() != BookCategory.ToRead) {
             throw new IllegalArgumentException("현재 책 상태에서는 '책 읽기 시작'을 할 수 없습니다.");
         }
         
-        LocalDate readingStartDate = request.getReadingStartDate();
-        Integer readingProgress = request.getReadingProgress();
+        // 2. 필수 필드 검증
+        LocalDate readingStartDate = userBook.getReadingStartDate();
+        Integer readingProgress = userBook.getReadingProgress();
         if (readingStartDate == null) {
             throw new IllegalArgumentException("독서 시작일은 필수 입력 항목입니다.");
         }
@@ -365,14 +295,9 @@ public class BookService {
             throw new IllegalArgumentException("읽은 페이지 수는 전체 페이지 수(" + totalPages + ")를 초과할 수 없습니다.");
         }
         
-        // ToRead → Reading 전환 처리
+        // 3. ToRead → Reading 전환 처리
         userBook.setCategory(BookCategory.Reading);
         userBook.setCategoryManuallySet(true);
-        userBook.setReadingStartDate(readingStartDate);
-        userBook.setReadingProgress(readingProgress);
-        if (request.getPurchaseType() != null) {
-            userBook.setPurchaseType(request.getPurchaseType());
-        }
         // 진행 중인 상태로 변경 시 완독 정보 초기화
         userBook.setReadingFinishedDate(null);
         userBook.setRating(null);
@@ -384,192 +309,25 @@ public class BookService {
     
     /**
      * 책 상세 정보 변경
+     * UserShelfBook Entity를 받아서 처리
      * 카테고리별 입력값에 따라 기존 값은 유지하고, 새 값만 업데이트
      */
-    public UserShelfBook updateBookDetail(String loginId, Long userBookId, BookDetailUpdateRequest request) {
-        // 1. 사용자 조회
-        User user = userRepository.findActiveUserByLoginId(loginId)
-            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
+    public UserShelfBook updateBookDetail(UserShelfBook userBook) {
+        // 1. 카테고리별 입력값 검증
+        validateCategorySpecificFields(userBook);
         
-        // 2. UserBook 조회 및 소유권 확인
-        UserShelfBook userBook = userBookRepository.findById(userBookId)
-            .orElseThrow(() -> new IllegalArgumentException("책을 찾을 수 없습니다."));
-        
-        if (!userBook.getUserId().equals(user.getId())) {
-            throw new IllegalArgumentException("권한이 없습니다.");
-        }
-        
-        // 3. 카테고리 변경 처리 (명시적 변경 시 플래그 설정)
-        if (request.getCategory() != null && request.getCategory() != userBook.getCategory()) {
-            // 명시적으로 카테고리를 변경하는 경우 (예: "독서 시작" 버튼 클릭)
-            userBook.setCategory(request.getCategory());
-            userBook.setCategoryManuallySet(true);
-            
-            // ToRead → Reading 변경 시 (독서 시작)
-            if (request.getCategory() == BookCategory.Reading && 
-                userBook.getReadingStartDate() == null) {
-                // 독서 시작일이 없으면 오늘 날짜로 설정
-                userBook.setReadingStartDate(LocalDate.now());
-            }
-            
-            // ToRead → Reading 변경 시 진행률이 없으면 0으로 설정
-            if (request.getCategory() == BookCategory.Reading && 
-                userBook.getReadingProgress() == null) {
-                userBook.setReadingProgress(0);
-            }
-        }
-        
-        // 4. 현재 카테고리에 따라 입력값 업데이트 (기존 값은 유지)
-        updateCategorySpecificFields(userBook, request);
-        
-        // 5. 진행률 기반 자동 카테고리 변경 (Reading, AlmostFinished 카테고리에서 진행률 업데이트 시)
-        if (request.getReadingProgress() != null && 
+        // 2. 진행률 기반 자동 카테고리 변경 (Reading, AlmostFinished 카테고리에서 진행률 업데이트 시)
+        if (userBook.getReadingProgress() != null && 
             (userBook.getCategory() == BookCategory.Reading || userBook.getCategory() == BookCategory.AlmostFinished)) {
             autoUpdateCategoryByProgress(userBook);
         }
         
-        // 6. 업데이트 시간 갱신
+        // 3. 업데이트 시간 갱신
         userBook.setUpdatedAt(LocalDateTime.now());
         
         return userBookRepository.save(userBook);
     }
     
-    /**
-     * 카테고리별 입력값 업데이트
-     * 기존 값은 유지하고, 새로 입력된 값만 업데이트
-     */
-    private void updateCategorySpecificFields(UserShelfBook userBook, BookDetailUpdateRequest request) {
-        BookCategory category = userBook.getCategory();
-        
-        switch (category) {
-            case ToRead:
-                // 기대평 (선택사항) - 입력된 경우에만 업데이트
-                if (request.getExpectation() != null) {
-                    if (request.getExpectation().length() > 500) {
-                        throw new IllegalArgumentException("기대평은 500자 이하여야 합니다.");
-                    }
-                    userBook.setExpectation(request.getExpectation());
-                }
-                break;
-                
-            case Reading:
-                // 독서 시작일 (필수) - 입력된 경우에만 업데이트
-                if (request.getReadingStartDate() != null) {
-                    userBook.setReadingStartDate(request.getReadingStartDate());
-                }
-                
-                // 현재 읽은 페이지 수 (필수) - 입력된 경우에만 업데이트
-                if (request.getReadingProgress() != null) {
-                    // 전체 페이지 수와 비교 검증
-                    Integer totalPages = userBook.getBook().getTotalPages();
-                    if (totalPages != null && request.getReadingProgress() > totalPages) {
-                        throw new IllegalArgumentException("읽은 페이지 수는 전체 페이지 수(" + totalPages + ")를 초과할 수 없습니다.");
-                    }
-                    if (request.getReadingProgress() < 0) {
-                        throw new IllegalArgumentException("읽은 페이지 수는 0 이상이어야 합니다.");
-                    }
-                    userBook.setReadingProgress(request.getReadingProgress());
-                    // 진행률 기반 자동 카테고리 변경은 updateBookDetail에서 처리
-                }
-                
-                // 구매/대여 여부 (선택사항) - 입력된 경우에만 업데이트
-                if (request.getPurchaseType() != null) {
-                    userBook.setPurchaseType(request.getPurchaseType());
-                }
-                break;
-                
-            case AlmostFinished:
-                // 독서 시작일 (필수) - 입력된 경우에만 업데이트
-                if (request.getReadingStartDate() != null) {
-                    userBook.setReadingStartDate(request.getReadingStartDate());
-                }
-                
-                // 현재 읽은 페이지 수 (필수) - 입력된 경우에만 업데이트
-                if (request.getReadingProgress() != null) {
-                    // 전체 페이지 수와 비교 검증
-                    Integer totalPages = userBook.getBook().getTotalPages();
-                    if (totalPages != null && request.getReadingProgress() > totalPages) {
-                        throw new IllegalArgumentException("읽은 페이지 수는 전체 페이지 수(" + totalPages + ")를 초과할 수 없습니다.");
-                    }
-                    if (request.getReadingProgress() < 0) {
-                        throw new IllegalArgumentException("읽은 페이지 수는 0 이상이어야 합니다.");
-                    }
-                    userBook.setReadingProgress(request.getReadingProgress());
-                    // 진행률 기반 자동 카테고리 변경은 updateBookDetail에서 처리
-                }
-                
-                // 구매/대여 여부 (선택사항) - 입력된 경우에만 업데이트
-                if (request.getPurchaseType() != null) {
-                    userBook.setPurchaseType(request.getPurchaseType());
-                }
-                break;
-                
-            case Finished:
-                // 독서 시작일 - 입력된 경우에만 업데이트
-                if (request.getReadingStartDate() != null) {
-                    userBook.setReadingStartDate(request.getReadingStartDate());
-                }
-                
-                // 독서 종료일 - 입력된 경우에만 업데이트
-                if (request.getReadingFinishedDate() != null) {
-                    // 독서 종료일이 독서 시작일 이후인지 검증
-                    LocalDate readingStartDate = userBook.getReadingStartDate();
-                    if (readingStartDate != null && request.getReadingFinishedDate().isBefore(readingStartDate)) {
-                        throw new IllegalArgumentException("독서 종료일은 독서 시작일 이후여야 합니다.");
-                    }
-                    userBook.setReadingFinishedDate(request.getReadingFinishedDate());
-                }
-                
-                // 평점 - 입력된 경우에만 업데이트
-                if (request.getRating() != null) {
-                    if (request.getRating() < 1 || request.getRating() > 5) {
-                        throw new IllegalArgumentException("평점은 1 이상 5 이하여야 합니다.");
-                    }
-                    userBook.setRating(request.getRating());
-                }
-                
-                // 후기 (선택사항) - 입력된 경우에만 업데이트
-                if (request.getReview() != null) {
-                    userBook.setReview(request.getReview());
-                }
-                break;
-        }
-    }
-    
-    /**
-     * 직접 입력한 정보로 Book 생성
-     */
-    private Book createBookFromRequest(BookAdditionRequest request) {
-        // 직접 입력한 정보로 새 책 생성
-        Book newBook = new Book(
-            request.getIsbn(),
-            request.getTitle(),
-            request.getAuthor(),
-            request.getPublisher()
-        );
-        
-        // 추가 정보 설정 (선택사항)
-        if (request.getDescription() != null) {
-            newBook.setDescription(request.getDescription());
-        }
-        if (request.getCoverUrl() != null) {
-            newBook.setCoverUrl(request.getCoverUrl());
-        }
-        if (request.getTotalPages() != null) {
-            newBook.setTotalPages(request.getTotalPages());
-        }
-        if (request.getMainGenre() != null) {
-            newBook.setMainGenre(request.getMainGenre());
-        }
-        if (request.getPubDate() != null) {
-            newBook.setPubDate(request.getPubDate());
-        }
-        
-        newBook.setCreatedAt(LocalDateTime.now());
-        newBook.setUpdatedAt(LocalDateTime.now());
-        
-        return bookRepository.save(newBook);
-    }
     
     /**
      * 진행률 기반 자동 카테고리 변경

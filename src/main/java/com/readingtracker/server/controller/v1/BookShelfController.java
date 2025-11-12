@@ -3,14 +3,18 @@ package com.readingtracker.server.controller.v1;
 import com.readingtracker.server.common.constant.BookCategory;
 import com.readingtracker.server.common.constant.BookSortCriteria;
 import com.readingtracker.server.dto.ApiResponse;
-import com.readingtracker.server.dto.clientserverDTO.requestDTO.BookAdditionRequest;
-import com.readingtracker.server.dto.clientserverDTO.requestDTO.BookDetailUpdateRequest;
-import com.readingtracker.server.dto.clientserverDTO.requestDTO.StartReadingRequest;
-import com.readingtracker.server.dto.clientserverDTO.requestDTO.FinishReadingRequest;
-import com.readingtracker.server.dto.clientserverDTO.responseDTO.BookAdditionResponse;
-import com.readingtracker.server.dto.clientserverDTO.responseDTO.MyShelfResponse;
+import com.readingtracker.server.dto.requestDTO.BookAdditionRequest;
+import com.readingtracker.server.dto.responseDTO.BookAdditionResponse;
+import com.readingtracker.server.dto.requestDTO.StartReadingRequest;
+import com.readingtracker.server.dto.requestDTO.BookDetailUpdateRequest;
+import com.readingtracker.server.dto.responseDTO.MyShelfResponse;
+import com.readingtracker.server.dto.requestDTO.FinishReadingRequest;
 import com.readingtracker.dbms.entity.Book;
+import com.readingtracker.dbms.entity.User;
 import com.readingtracker.dbms.entity.UserShelfBook;
+import com.readingtracker.dbms.repository.UserRepository;
+import com.readingtracker.dbms.repository.UserShelfBookRepository;
+import com.readingtracker.server.mapper.BookMapper;
 import com.readingtracker.server.service.BookService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -24,7 +28,6 @@ import org.springframework.web.bind.annotation.*;
 import jakarta.validation.Valid;
 
 import java.util.List;
-import java.util.stream.Collectors;
 
 @RestController
 @RequestMapping("/api/v1")
@@ -33,6 +36,15 @@ public class BookShelfController extends BaseV1Controller {
     
     @Autowired
     private BookService bookService;
+    
+    @Autowired
+    private BookMapper bookMapper;
+    
+    @Autowired
+    private UserRepository userRepository;
+    
+    @Autowired
+    private UserShelfBookRepository userShelfBookRepository;
     
     /**
      * 내 서재에 책 추가 (인증 필요)
@@ -52,15 +64,19 @@ public class BookShelfController extends BaseV1Controller {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         String loginId = (String) authentication.getPrincipal();
         
-        // 책 추가 처리
-        UserShelfBook userBook = bookService.addBookToShelf(loginId, request);
+        // 사용자 조회
+        User user = userRepository.findActiveUserByLoginId(loginId)
+            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
         
-        BookAdditionResponse response = new BookAdditionResponse(
-            "책이 내 서재에 추가되었습니다.",
-            userBook.getBookId(),
-            request.getTitle(),
-            userBook.getCategory()
-        );
+        // Mapper를 통해 RequestDTO → Entity 변환
+        Book book = bookMapper.toBookEntity(request);
+        UserShelfBook userShelfBook = bookMapper.toUserShelfBookEntity(request, user);
+        
+        // Service 호출 (Entity만 전달)
+        UserShelfBook savedUserBook = bookService.addBookToShelf(book, userShelfBook);
+        
+        // Mapper를 통해 Entity → ResponseDTO 변환
+        BookAdditionResponse response = bookMapper.toBookAdditionResponse(savedUserBook);
         
         return ApiResponse.success(response);
     }
@@ -85,15 +101,15 @@ public class BookShelfController extends BaseV1Controller {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         String loginId = (String) authentication.getPrincipal();
         
-        // 내 서재 조회
-        List<UserShelfBook> userBooks = bookService.getMyShelf(loginId, category, sortBy);
+        // 사용자 조회
+        User user = userRepository.findActiveUserByLoginId(loginId)
+            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
         
-        // DTO 변환
-        List<MyShelfResponse.ShelfBook> shelfBooks = userBooks.stream()
-            .map(this::convertToShelfBook)
-            .collect(Collectors.toList());
+        // 내 서재 조회 (Entity 반환)
+        List<UserShelfBook> userBooks = bookService.getMyShelf(user.getId(), category, sortBy);
         
-        MyShelfResponse response = new MyShelfResponse(shelfBooks, shelfBooks.size());
+        // Mapper를 통해 Entity → ResponseDTO 변환
+        MyShelfResponse response = bookMapper.toMyShelfResponse(userBooks);
         
         return ApiResponse.success(response);
     }
@@ -116,8 +132,20 @@ public class BookShelfController extends BaseV1Controller {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         String loginId = (String) authentication.getPrincipal();
         
-        // 책 제거 처리
-        bookService.removeBookFromShelf(loginId, userBookId);
+        // 사용자 조회
+        User user = userRepository.findActiveUserByLoginId(loginId)
+            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
+        
+        // UserShelfBook 조회 및 소유권 확인
+        UserShelfBook userBook = userShelfBookRepository.findById(userBookId)
+            .orElseThrow(() -> new IllegalArgumentException("책을 찾을 수 없습니다."));
+        
+        if (!userBook.getUserId().equals(user.getId())) {
+            throw new IllegalArgumentException("권한이 없습니다.");
+        }
+        
+        // Service 호출 (Entity만 전달)
+        bookService.removeBookFromShelf(userBook);
         
         return ApiResponse.success("책이 내 서재에서 제거되었습니다.");
     }
@@ -142,8 +170,20 @@ public class BookShelfController extends BaseV1Controller {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         String loginId = (String) authentication.getPrincipal();
         
-        // 책 상태 변경 처리
-        bookService.updateBookCategory(loginId, userBookId, category);
+        // 사용자 조회
+        User user = userRepository.findActiveUserByLoginId(loginId)
+            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
+        
+        // UserShelfBook 조회 및 소유권 확인
+        UserShelfBook userBook = userShelfBookRepository.findById(userBookId)
+            .orElseThrow(() -> new IllegalArgumentException("책을 찾을 수 없습니다."));
+        
+        if (!userBook.getUserId().equals(user.getId())) {
+            throw new IllegalArgumentException("권한이 없습니다.");
+        }
+        
+        // Service 호출 (Entity만 전달)
+        bookService.updateBookCategory(userBook, category);
         
         return ApiResponse.success("책의 읽기 상태가 변경되었습니다.");
     }
@@ -161,10 +201,32 @@ public class BookShelfController extends BaseV1Controller {
             @Parameter(description = "사용자 책 ID", required = true)
             @PathVariable Long userBookId,
             @Valid @RequestBody StartReadingRequest request) {
+        
+        // 현재 로그인한 사용자 ID 가져오기
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         String loginId = (String) authentication.getPrincipal();
         
-        bookService.startReading(loginId, userBookId, request);
+        // 사용자 조회
+        User user = userRepository.findActiveUserByLoginId(loginId)
+            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
+        
+        // UserShelfBook 조회 및 소유권 확인
+        UserShelfBook userBook = userShelfBookRepository.findById(userBookId)
+            .orElseThrow(() -> new IllegalArgumentException("책을 찾을 수 없습니다."));
+        
+        if (!userBook.getUserId().equals(user.getId())) {
+            throw new IllegalArgumentException("권한이 없습니다.");
+        }
+        
+        // RequestDTO의 필드를 Entity에 설정
+        userBook.setReadingStartDate(request.getReadingStartDate());
+        userBook.setReadingProgress(request.getReadingProgress());
+        if (request.getPurchaseType() != null) {
+            userBook.setPurchaseType(request.getPurchaseType());
+        }
+        
+        // Service 호출 (Entity만 전달)
+        bookService.startReading(userBook);
         
         return ApiResponse.success("책 읽기를 시작했습니다.");
     }
@@ -182,10 +244,32 @@ public class BookShelfController extends BaseV1Controller {
             @Parameter(description = "사용자 책 ID", required = true)
             @PathVariable Long userBookId,
             @Valid @RequestBody FinishReadingRequest request) {
+        
+        // 현재 로그인한 사용자 ID 가져오기
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         String loginId = (String) authentication.getPrincipal();
         
-        bookService.finishReading(loginId, userBookId, request);
+        // 사용자 조회
+        User user = userRepository.findActiveUserByLoginId(loginId)
+            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
+        
+        // UserShelfBook 조회 및 소유권 확인
+        UserShelfBook userBook = userShelfBookRepository.findById(userBookId)
+            .orElseThrow(() -> new IllegalArgumentException("책을 찾을 수 없습니다."));
+        
+        if (!userBook.getUserId().equals(user.getId())) {
+            throw new IllegalArgumentException("권한이 없습니다.");
+        }
+        
+        // RequestDTO의 필드를 Entity에 설정
+        userBook.setReadingFinishedDate(request.getReadingFinishedDate());
+        userBook.setRating(request.getRating());
+        if (request.getReview() != null) {
+            userBook.setReview(request.getReview());
+        }
+        
+        // Service 호출 (Entity만 전달)
+        bookService.finishReading(userBook);
         
         return ApiResponse.success("책이 완독 처리되었습니다.");
     }
@@ -210,40 +294,49 @@ public class BookShelfController extends BaseV1Controller {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         String loginId = (String) authentication.getPrincipal();
         
-        // 책 상세 정보 변경 처리
-        bookService.updateBookDetail(loginId, userBookId, request);
+        // 사용자 조회
+        User user = userRepository.findActiveUserByLoginId(loginId)
+            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
         
-        return ApiResponse.success("책 상세 정보가 변경되었습니다.");
-    }
-    
-    /**
-     * UserBook을 ShelfBook으로 변환
-     */
-    private MyShelfResponse.ShelfBook convertToShelfBook(UserShelfBook userBook) {
-        MyShelfResponse.ShelfBook shelfBook = new MyShelfResponse.ShelfBook();
+        // UserShelfBook 조회 및 소유권 확인
+        UserShelfBook userBook = userShelfBookRepository.findById(userBookId)
+            .orElseThrow(() -> new IllegalArgumentException("책을 찾을 수 없습니다."));
         
-        shelfBook.setUserBookId(userBook.getId());
-        shelfBook.setBookId(userBook.getBookId());
-        shelfBook.setCategory(userBook.getCategory());
-        shelfBook.setLastReadPage(userBook.getLastReadPage());
-        shelfBook.setLastReadAt(userBook.getLastReadAt());
-        shelfBook.setAddedAt(userBook.getAddedAt());
-        
-        // Book 정보 설정
-        Book book = userBook.getBook();
-        if (book != null) {
-            shelfBook.setIsbn(book.getIsbn());
-            shelfBook.setTitle(book.getTitle());
-            shelfBook.setAuthor(book.getAuthor());
-            shelfBook.setPublisher(book.getPublisher());
-            shelfBook.setDescription(book.getDescription());
-            shelfBook.setCoverUrl(book.getCoverUrl());
-            shelfBook.setTotalPages(book.getTotalPages());
-            shelfBook.setMainGenre(book.getMainGenre());
-            shelfBook.setPubDate(book.getPubDate());
+        if (!userBook.getUserId().equals(user.getId())) {
+            throw new IllegalArgumentException("권한이 없습니다.");
         }
         
-        return shelfBook;
+        // RequestDTO의 필드를 Entity에 설정 (null이 아닌 값만 업데이트)
+        if (request.getCategory() != null) {
+            userBook.setCategory(request.getCategory());
+            userBook.setCategoryManuallySet(true);
+        }
+        if (request.getExpectation() != null) {
+            userBook.setExpectation(request.getExpectation());
+        }
+        if (request.getReadingStartDate() != null) {
+            userBook.setReadingStartDate(request.getReadingStartDate());
+        }
+        if (request.getReadingProgress() != null) {
+            userBook.setReadingProgress(request.getReadingProgress());
+        }
+        if (request.getPurchaseType() != null) {
+            userBook.setPurchaseType(request.getPurchaseType());
+        }
+        if (request.getReadingFinishedDate() != null) {
+            userBook.setReadingFinishedDate(request.getReadingFinishedDate());
+        }
+        if (request.getRating() != null) {
+            userBook.setRating(request.getRating());
+        }
+        if (request.getReview() != null) {
+            userBook.setReview(request.getReview());
+        }
+        
+        // Service 호출 (Entity만 전달)
+        bookService.updateBookDetail(userBook);
+        
+        return ApiResponse.success("책 상세 정보가 변경되었습니다.");
     }
 }
 

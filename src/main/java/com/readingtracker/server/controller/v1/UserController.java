@@ -2,6 +2,7 @@ package com.readingtracker.server.controller.v1;
 
 import com.readingtracker.server.dto.ApiResponse;
 import com.readingtracker.dbms.entity.User;
+import com.readingtracker.server.mapper.UserMapper;
 import com.readingtracker.server.service.UserService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
@@ -18,6 +19,9 @@ public class UserController extends BaseV1Controller {
     
     @Autowired
     private UserService userService;
+    
+    @Autowired
+    private UserMapper userMapper;
     
     /**
      * 내 프로필 조회 (인증 필요)
@@ -41,7 +45,8 @@ public class UserController extends BaseV1Controller {
             throw new IllegalArgumentException("사용자를 찾을 수 없습니다.");
         }
         
-        UserProfileResponse response = new UserProfileResponse(user);
+        // Entity → ResponseDTO 변환 (Mapper 사용)
+        UserProfileResponse response = userMapper.toUserProfileResponse(user);
         
         return ApiResponse.success(response);
     }
@@ -56,6 +61,10 @@ public class UserController extends BaseV1Controller {
         private String name;
         private String role;
         private String status;
+        
+        // 기본 생성자 (MapStruct를 위해 필요)
+        public UserProfileResponse() {
+        }
         
         public UserProfileResponse(User user) {
             this.id = user.getId();
@@ -74,7 +83,7 @@ public class UserController extends BaseV1Controller {
         public String getRole() { return role; }
         public String getStatus() { return status; }
         
-        // Setters
+        // Setters (MapStruct를 위해 필요)
         public void setId(Long id) { this.id = id; }
         public void setLoginId(String loginId) { this.loginId = loginId; }
         public void setEmail(String email) { this.email = email; }

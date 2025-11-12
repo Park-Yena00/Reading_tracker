@@ -2,24 +2,19 @@ package com.readingtracker.server.controller.v1;
 
 import com.readingtracker.server.config.JwtConfig;
 import com.readingtracker.server.dto.ApiResponse;
-import com.readingtracker.server.dto.clientserverDTO.requestDTO.AccountVerificationRequest;
-import com.readingtracker.server.dto.clientserverDTO.requestDTO.LoginIdRetrievalRequest;
-import com.readingtracker.server.dto.clientserverDTO.requestDTO.LoginRequest;
-import com.readingtracker.server.dto.clientserverDTO.requestDTO.PasswordResetRequest;
-import com.readingtracker.server.dto.clientserverDTO.requestDTO.RefreshTokenRequest;
-import com.readingtracker.server.dto.clientserverDTO.requestDTO.RegistrationRequest;
-import com.readingtracker.server.dto.clientserverDTO.responseDTO.AccountVerificationResponse;
-import com.readingtracker.server.dto.clientserverDTO.responseDTO.LoginIdRetrievalResponse;
-import com.readingtracker.server.dto.clientserverDTO.responseDTO.PasswordResetResponse;
-import com.readingtracker.server.dto.clientserverDTO.responseDTO.RefreshTokenResponse;
-import com.readingtracker.dbms.dto.serverdbmsDTO.commandDTO.AccountVerificationCommand;
-import com.readingtracker.dbms.dto.serverdbmsDTO.commandDTO.LoginCommand;
-import com.readingtracker.dbms.dto.serverdbmsDTO.commandDTO.LoginIdRetrievalCommandDTO;
-import com.readingtracker.dbms.dto.serverdbmsDTO.commandDTO.PasswordResetCommand;
-import com.readingtracker.dbms.dto.serverdbmsDTO.commandDTO.UserCreationCommand;
-import com.readingtracker.dbms.dto.serverdbmsDTO.resultDTO.LoginIdRetrievalResult;
-import com.readingtracker.dbms.dto.serverdbmsDTO.resultDTO.UserResult;
+import com.readingtracker.server.dto.requestDTO.AccountVerificationRequest;
+import com.readingtracker.server.dto.requestDTO.LoginIdRetrievalRequest;
+import com.readingtracker.server.dto.requestDTO.LoginRequest;
+import com.readingtracker.server.dto.requestDTO.PasswordResetRequest;
+import com.readingtracker.server.dto.requestDTO.RefreshTokenRequest;
+import com.readingtracker.server.dto.requestDTO.RegistrationRequest;
+import com.readingtracker.server.dto.responseDTO.AccountVerificationResponse;
+import com.readingtracker.server.dto.responseDTO.LoginIdRetrievalResponse;
+import com.readingtracker.server.dto.responseDTO.LoginResponse;
+import com.readingtracker.server.dto.responseDTO.PasswordResetResponse;
+import com.readingtracker.server.dto.responseDTO.RefreshTokenResponse;
 import com.readingtracker.dbms.entity.User;
+import com.readingtracker.server.mapper.AuthMapper;
 import com.readingtracker.server.service.AuthService;
 import com.readingtracker.server.service.JwtService;
 import com.readingtracker.server.service.UserService;
@@ -39,6 +34,9 @@ public class AuthController extends BaseV1Controller {
     
     @Autowired
     private AuthService authService;
+    
+    @Autowired
+    private AuthMapper authMapper;
     
     @Autowired
     private JwtConfig jwtConfig;
@@ -83,16 +81,11 @@ public class AuthController extends BaseV1Controller {
             @Parameter(description = "회원가입 정보", required = true)
             @RequestBody RegistrationRequest request) {
         
-        // Client Request DTO를 Command DTO로 변환
-        UserCreationCommand command = new UserCreationCommand(
-            request.getLoginId(),
-            request.getEmail(),
-            request.getName(),
-            request.getPassword()
-        );
+        // Service 호출 (RequestDTO → Entity)
+        User user = authService.register(request);
         
-        UserResult userResult = authService.register(command);
-        RegisterResponse response = new RegisterResponse(userResult);
+        // Entity → ResponseDTO 변환 (Mapper 사용)
+        RegisterResponse response = authMapper.toRegisterResponse(user);
         
         return ApiResponse.success(response);
     }
@@ -108,21 +101,34 @@ public class AuthController extends BaseV1Controller {
         private User.Role role;
         private User.Status status;
         
-        public RegisterResponse(UserResult user) {
-            this.id = user.getId();
-            this.loginId = user.getLoginId();
-            this.email = user.getEmail();
-            this.name = user.getName();
-            this.role = user.getRole();
-            this.status = user.getStatus();
+        // 기본 생성자 (MapStruct를 위해 필요)
+        public RegisterResponse() {
         }
         
+        public RegisterResponse(Long id, String loginId, String email, String name, User.Role role, User.Status status) {
+            this.id = id;
+            this.loginId = loginId;
+            this.email = email;
+            this.name = name;
+            this.role = role;
+            this.status = status;
+        }
+        
+        // Getters
         public Long getId() { return id; }
         public String getLoginId() { return loginId; }
         public String getEmail() { return email; }
         public String getName() { return name; }
         public User.Role getRole() { return role; }
         public User.Status getStatus() { return status; }
+        
+        // Setters (MapStruct를 위해 필요)
+        public void setId(Long id) { this.id = id; }
+        public void setLoginId(String loginId) { this.loginId = loginId; }
+        public void setEmail(String email) { this.email = email; }
+        public void setName(String name) { this.name = name; }
+        public void setRole(User.Role role) { this.role = role; }
+        public void setStatus(User.Status status) { this.status = status; }
     }
     
     /**
@@ -135,19 +141,18 @@ public class AuthController extends BaseV1Controller {
             @Parameter(description = "로그인 정보", required = true)
             @RequestBody LoginRequest request) {
         
-        // Client Request DTO를 Command DTO로 변환
-        LoginCommand command = new LoginCommand(
-            request.getLoginId(),
-            request.getPassword()
-        );
+        // Service 호출 (RequestDTO → Entity)
+        AuthService.LoginResult result = authService.login(request);
         
-        AuthService.LoginResult result = authService.login(command);
+        // Entity → ResponseDTO 변환 (Mapper 사용)
+        LoginResponse.UserInfo userInfo = authMapper.toLoginUserInfo(result.getUser());
         
-        LoginResponse response = new LoginResponse(
-            result.getAccessToken(),
-            result.getRefreshToken(),
-            result.getUser()
-        );
+        LoginResponse response = new LoginResponse();
+        response.setAccessToken(result.getAccessToken());
+        response.setRefreshToken(result.getRefreshToken());
+        response.setTokenType("Bearer");
+        response.setExpiresIn(jwtConfig.getAccessTokenExpiration());
+        response.setUser(userInfo);
         
         return ApiResponse.success(response);
     }
@@ -162,14 +167,11 @@ public class AuthController extends BaseV1Controller {
             @Parameter(description = "아이디 찾기 정보 (이메일, 이름)", required = true)
             @RequestBody LoginIdRetrievalRequest request) {
         
-        // Client Request DTO를 Command DTO로 변환
-        LoginIdRetrievalCommandDTO command = new LoginIdRetrievalCommandDTO(
-            request.getEmail(),
-            request.getName()
-        );
+        // Service 호출 (RequestDTO → Entity)
+        User user = authService.findLoginIdByEmailAndName(request);
         
-        LoginIdRetrievalResult result = authService.findLoginIdByEmailAndName(command);
-        LoginIdRetrievalResponse response = new LoginIdRetrievalResponse(result.getLoginId(), result.getEmail());
+        // Entity → ResponseDTO 변환 (Mapper 사용)
+        LoginIdRetrievalResponse response = authMapper.toLoginIdRetrievalResponse(user);
         
         return ApiResponse.success(response);
     }
@@ -184,13 +186,10 @@ public class AuthController extends BaseV1Controller {
             @Parameter(description = "계정 확인 정보 (loginId, email)", required = true)
             @RequestBody AccountVerificationRequest request) {
         
-        // Client Request DTO를 Command DTO로 변환
-        AccountVerificationCommand command = new AccountVerificationCommand(
-            request.getLoginId(),
-            request.getEmail()
-        );
+        // Service 호출 (RequestDTO → String 토큰)
+        String resetToken = authService.verifyAccountForPasswordReset(request);
         
-        String resetToken = authService.verifyAccountForPasswordReset(command);
+        // ResponseDTO 생성
         AccountVerificationResponse response = new AccountVerificationResponse(
             "계정이 확인되었습니다. 새 비밀번호를 입력해주세요.",
             resetToken
@@ -209,18 +208,11 @@ public class AuthController extends BaseV1Controller {
             @Parameter(description = "비밀번호 재설정 정보 (resetToken, newPassword, confirmPassword)", required = true)
             @RequestBody PasswordResetRequest request) {
         
-        // Client Request DTO를 Command DTO로 변환
-        PasswordResetCommand command = new PasswordResetCommand(
-            request.getResetToken(),
-            request.getNewPassword(),
-            request.getConfirmPassword()
-        );
+        // Service 호출 (RequestDTO → Entity)
+        User user = authService.resetPassword(request);
         
-        UserResult userResult = authService.resetPassword(command);
-        PasswordResetResponse response = new PasswordResetResponse(
-            "비밀번호가 성공적으로 변경되었습니다.",
-            userResult.getLoginId()
-        );
+        // Entity → ResponseDTO 변환 (Mapper 사용)
+        PasswordResetResponse response = authMapper.toPasswordResetResponse(user);
         
         return ApiResponse.success(response);
     }
@@ -247,47 +239,4 @@ public class AuthController extends BaseV1Controller {
         return ApiResponse.success(response);
     }
     
-    /**
-     * 로그인 응답 클래스
-     */
-    public static class LoginResponse {
-        private String accessToken;
-        private String refreshToken;
-        private UserInfo user;
-        
-        public LoginResponse(String accessToken, String refreshToken, UserResult user) {
-            this.accessToken = accessToken;
-            this.refreshToken = refreshToken;
-            this.user = new UserInfo(user);
-        }
-        
-        public String getAccessToken() { return accessToken; }
-        public String getRefreshToken() { return refreshToken; }
-        public UserInfo getUser() { return user; }
-        
-        public static class UserInfo {
-            private Long id;
-            private String loginId;
-            private String email;
-            private String name;
-            private User.Role role;
-            private User.Status status;
-            
-            public UserInfo(UserResult user) {
-                this.id = user.getId();
-                this.loginId = user.getLoginId();
-                this.email = user.getEmail();
-                this.name = user.getName();
-                this.role = user.getRole();
-                this.status = user.getStatus();
-            }
-            
-            public Long getId() { return id; }
-            public String getLoginId() { return loginId; }
-            public String getEmail() { return email; }
-            public String getName() { return name; }
-            public User.Role getRole() { return role; }
-            public User.Status getStatus() { return status; }
-        }
-    }
 }
