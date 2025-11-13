@@ -21,21 +21,18 @@
 
 #### Client ↔ Server 경계
 - `server.controller` - REST API 컨트롤러 (클라이언트와의 통신 담당)
-- `server.dto.clientserverDTO` - 클라이언트-서버 간 데이터 전송 객체
+- `server.dto` - 클라이언트-서버 간 데이터 전송 객체
   - `requestDTO` - 클라이언트 → 서버 요청 DTO
   - `responseDTO` - 서버 → 클라이언트 응답 DTO
   - `ApiResponse.java`, `ErrorResponse.java` - 공통 응답 래퍼 (dto 바로 아래)
+- `server.mapper` - DTO ↔ Entity 변환 계층 (Controller ↔ Service 경계)
 
 #### Server ↔ DBMS 경계
 - `dbms.repository` - 데이터 접근 계층 (DBMS와의 통신 담당)
-- `dbms.dto.serverdbmsDTO` - 서버-DBMS 간 데이터 전송 객체
-  - `commandDTO` - 서비스 → DBMS 명령 DTO
-  - `resultDTO` - DBMS → 서비스 결과 DTO
 - `dbms.entity` - JPA 엔티티 (데이터베이스 테이블 매핑)
 
 #### 서버 내부
-- `server.service` - 비즈니스 로직 (서버 내부 처리)
-  - `validation` - 검증 로직
+- `server.service` - 비즈니스 로직 (서버 내부 처리, Entity만 사용)
 
 #### 서버 공통 요소
 - `server.common` - 서버 공통 요소
@@ -74,22 +71,25 @@ com.readingtracker
 │   │       └── ...
 │   ├── security                       # Client ↔ Server 경계 (인증/인가)
 │   │   └── JwtAuthenticationFilter.java
+│   ├── mapper                        # Controller ↔ Service 경계
+│   │   ├── UserMapper.java
+│   │   ├── BookMapper.java
+│   │   ├── AuthMapper.java
+│   │   └── ...
 │   ├── service                       # 서버 내부 비즈니스 로직
-│   │   ├── validation               # 검증 로직
-│   │   │   ├── UserValidationService.java
-│   │   │   └── BookValidationService.java
 │   │   ├── AuthService.java
 │   │   ├── UserService.java
 │   │   ├── BookService.java
 │   │   └── ...
 │   └── dto                           # Client ↔ Server 경계
-│       ├── clientserverDTO           # 클라이언트-서버 DTO
-│       │   ├── requestDTO           # 클라이언트 → 서버 요청
-│       │   │   ├── LoginRequest.java
-│       │   │   └── ...
-│       │   └── responseDTO          # 서버 → 클라이언트 응답
-│       │       ├── LoginResponse.java
-│       │       └── ...
+│       ├── requestDTO               # 클라이언트 → 서버 요청
+│       │   ├── LoginRequest.java
+│       │   ├── RegistrationRequest.java
+│       │   └── ...
+│       ├── responseDTO              # 서버 → 클라이언트 응답
+│       │   ├── LoginResponse.java
+│       │   ├── BookSearchResponse.java
+│       │   └── ...
 │       ├── ApiResponse.java          # 공통 응답 래퍼
 │       └── ErrorResponse.java        # 공통 에러 응답
 │
@@ -98,16 +98,10 @@ com.readingtracker
     │   ├── UserRepository.java
     │   ├── BookRepository.java
     │   └── ...
-    ├── entity                        # Server ↔ DBMS 경계
-    │   ├── User.java
-    │   ├── Book.java
-    │   └── ...
-    └── dto                           # Server ↔ DBMS 경계
-        └── serverdbmsDTO            # 서버-DBMS DTO
-            ├── commandDTO            # 서비스 → DBMS 명령
-            │   └── ...
-            └── resultDTO            # DBMS → 서비스 결과
-                └── ...
+    └── entity                        # Server ↔ DBMS 경계
+        ├── User.java
+        ├── Book.java
+        └── ...
 
 src/main/resources/                   # 리소스 파일 (위치 변경 없음)
 ├── application.yml                  # Spring Boot 전역 설정
@@ -328,13 +322,51 @@ books (1) ← (N) user_books
 
 **정리 작업**: 매 시간 정각에 만료된 사용된 토큰 정리
 
+## DTO와 Entity의 역할
+
+### DTO (Data Transfer Object)의 역할
+
+#### 목적
+데이터를 계층 간, 서비스 간, 또는 프로세스 간에 **전송(Transfer)**하는 데 사용됩니다.
+
+#### 책임
+
+1. **외부 통신 규약**: 클라이언트(웹/앱)와 서버 간의 JSON/HTTP 통신 형식에 맞춰 데이터를 캡슐화합니다.
+   - HTTP 요청/응답 본문의 JSON 구조를 정의
+   - 클라이언트와 서버 간의 계약(Contract) 역할
+
+2. **데이터 필터링**: 클라이언트가 필요로 하는 최소한의 필드만 노출하거나, 보안상 민감한 데이터를 제거합니다.
+   - 예: `User` Entity에는 `password` 필드가 있지만, `UserProfileResponse` DTO에는 포함하지 않음
+   - 클라이언트에 불필요한 내부 구현 세부사항을 숨김
+
+### Entity (Domain Model)의 역할
+
+#### 목적
+핵심 비즈니스 영역의 데이터와 **행위(로직)**를 함께 캡슐화하는 도메인 모델입니다.
+
+#### 책임
+
+1. **상태 관리**: 데이터베이스에 저장될 영속적인 상태를 나타냅니다.
+   - JPA `@Entity` 어노테이션으로 데이터베이스 테이블과 매핑
+   - 영속성 컨텍스트를 통한 생명주기 관리
+
+2. **비즈니스 로직**: 데이터의 무결성을 보장하는 로직이나, 상태를 변경하는 핵심 비즈니스 로직을 포함합니다.
+   - 도메인 규칙 검증
+   - 상태 변경 메서드 (예: `startReading()`, `finishReading()`)
+
+### DTO와 Entity의 관계
+
+- **DTO**: 클라이언트와 서버 간의 통신을 위한 데이터 전송 객체
+- **Entity**: 서버 내부의 비즈니스 로직과 데이터베이스 영속성을 위한 도메인 모델
+- **변환**: Mapper 계층을 통해 DTO ↔ Entity 변환 수행
+
 ## DTO 구조
 
 ### 3-tier Architecture 기반 DTO 분리
 
-#### 1. ClientServerDTO (Client ↔ Server 경계)
+#### Client ↔ Server 경계 DTO
 - **용도**: 클라이언트와 서버 간 통신
-- **위치**: `server.dto.clientserverDTO`
+- **위치**: `server.dto`
 - **구조**:
   - `requestDTO`: 클라이언트 → 서버 요청 DTO
   - `responseDTO`: 서버 → 클라이언트 응답 DTO
@@ -348,12 +380,16 @@ books (1) ← (N) user_books
   - 서버는 요청에 대한 응답만 되돌려주면 되며, 네트워크 라우팅이 응답을 올바른 클라이언트에게 전달
   - 동일한 HTTP/HTTPS 프로토콜과 동일한 DTO 형식을 사용하므로 클라이언트 종류를 구분할 필요 없음
 
-#### 2. ServerDbmsDTO (Server ↔ DBMS 경계)
-- **용도**: 서버 내부 로직과 DBMS 간 통신
-- **위치**: `dbms.dto.serverdbmsDTO`
-- **구조**:
-  - `commandDTO`: 서비스 → DBMS 명령 DTO
-  - `resultDTO`: DBMS → 서비스 결과 DTO
+#### JSON 처리 정책
+- **클라이언트 요구사항**: 클라이언트(웹/앱)가 서버에 데이터를 전송할 때는 **반드시 JSON 형식**으로 보내야 함
+- **서버 설정**: 
+  - `@RestController` 사용으로 자동 JSON 직렬화/역직렬화
+  - `@RequestBody` 사용으로 HTTP 요청 본문을 JSON으로 파싱
+  - Jackson 라이브러리 자동 포함 (`spring-boot-starter-web`)
+- **Content-Type**: `application/json` (기본값)
+- **데이터 흐름**:
+  - 클라이언트 → 서버: JSON → DTO (자동 변환)
+  - 서버 → 클라이언트: DTO → JSON (자동 변환)
 
 ### API 응답 구조
 
@@ -373,8 +409,11 @@ books (1) ← (N) user_books
 - **버전 관리**: `v1` 패키지 사용
 - **RESTful 원칙 준수**
 
+### API 엔드포인트 상세
+자세한 엔드포인트 정보는 [API_ENDPOINTS.md](./API_ENDPOINTS.md)를 참조하세요.
+
 ### 예시 엔드포인트
-- `POST /api/v1/auth/register` - 회원가입
+- `POST /api/v1/auth/signup` - 회원가입
 - `POST /api/v1/auth/login` - 로그인
 - `GET /api/v1/books/search` - 도서 검색
 - `POST /api/v1/user/books` - 서재에 책 추가
@@ -413,6 +452,163 @@ books (1) ← (N) user_books
 - `V8__Alter_user_books_table.sql`
 - `V9__Rename_tables.sql` - 테이블 이름 명명 규칙 변경 (참고용, 현재는 소문자 snake_case 사용)
 
+## MapStruct 기반 DTO-Entity 변환 아키텍처
+
+### DTO → Entity 변환의 필요성
+
+DTO를 Entity로 변환하는 목적은 데이터를 데이터베이스에 저장하거나 도메인 모델의 상태를 변경하기 위함입니다.
+
+#### 1. 검색 요청 (Read Operation)의 경우
+
+책 검색은 데이터를 DB에 저장하거나 도메인 모델의 상태를 변경하는 쓰기(Write) 작업이 아닙니다. 이것은 단순히 데이터를 조회하기 위한 입력 값입니다.
+
+**예시**: `GET /api/v1/books/search?query=온실`
+
+- **요청 데이터**: `query=온실`, `queryType=TITLE`
+- **Controller의 처리**: Controller는 이 검색어 "온실"과 검색 기준 "도서명"을 직접 Service 계층의 메서드 인자로 전달하면 됩니다.
+- **변환 불필요**: 이 단순한 문자열 데이터를 굳이 `BookSearchRequest` DTO에서 `SearchCommandEntity`와 같은 Entity로 변환하는 것은 불필요한 오버헤드만 추가합니다.
+
+**구현 예시**:
+```java
+@GetMapping("/books/search")
+public ApiResponse<BookSearchResponse> searchBooks(
+        @RequestParam String query,
+        @RequestParam BookSearchFilter queryType) {
+    // DTO를 Entity로 변환하지 않고, 직접 Service에 전달
+    BookSearchResponse response = aladinApiService.searchBooks(query, queryType);
+    return ApiResponse.success(response);
+}
+```
+
+#### 2. 쓰기 작업 (Write Operation)의 경우 (변환 필요)
+
+Entity 변환은 DB에 저장하거나 상태를 변경하는 요청일 때만 필요합니다.
+
+**예시**: `POST /api/v1/user/books` (서재에 책 추가)
+
+- **요청**: 클라이언트가 `BookAdditionRequest` DTO를 보냄
+- **변환 필요**: 이 DTO를 Mapper를 통해 `Book` Entity와 `UserShelfBook` Entity로 변환
+- **이유**: 데이터베이스에 저장하고, 도메인 모델의 상태를 변경해야 하므로
+
+**구현 예시**:
+```java
+@PostMapping("/user/books")
+public ApiResponse<BookAdditionResponse> addBookToShelf(
+        @Valid @RequestBody BookAdditionRequest request) {
+    // DTO → Entity 변환 (Mapper 사용)
+    Book book = bookMapper.toBookEntity(request);
+    UserShelfBook userShelfBook = bookMapper.toUserShelfBookEntity(request, user);
+    
+    // Entity를 Service에 전달하여 DB 저장
+    UserShelfBook saved = bookService.addBookToShelf(book, userShelfBook);
+    
+    // Entity → DTO 변환 (Mapper 사용)
+    BookAdditionResponse response = bookMapper.toBookAdditionResponse(saved);
+    return ApiResponse.success(response);
+}
+```
+
+#### 결론
+
+- **검색(GET 요청)**과 같이 읽기(Read) 위주의 요청은 데이터를 DB에 저장하거나 핵심 도메인 모델의 상태를 변경하지 않으므로, Controller는 `String`이나 간단한 객체 형태로 데이터를 Service에 바로 전달하는 것이 가장 효율적이고 클린합니다.
+- **DTO → Entity 변환은 데이터의 무결성이나 상태 변경이 필요할 때만 사용**하세요.
+
+### 핵심 원칙
+
+#### 1. 변환 책임 분리
+- **Controller**: 변환 작업 없음, Mapper만 호출
+- **Mapper**: 모든 DTO ↔ Entity 변환 담당 (MapStruct 사용)
+- **Service**: Entity만 사용 (DTO 사용 안 함)
+
+#### 2. Service 계층의 Entity 사용
+- Service 간 통신: Entity 사용
+- DB 작업: Entity 사용
+- 비즈니스 로직: Entity 기반
+
+#### 3. MapStruct 사용
+- 컴파일 타임에 매핑 코드 자동 생성
+- 타입 안정성 보장
+- 성능 최적화
+
+### 전체 흐름
+
+```
+클라이언트
+  ↓ RequestDTO (JSON)
+Controller
+  ↓ RequestDTO
+Mapper (RequestDTO → Entity)
+  ↓ Entity
+Service
+  ↓ Entity 작업
+  ↓ Entity 반환
+Mapper (Entity → ResponseDTO)
+  ↓ ResponseDTO
+Controller
+  ↓ ResponseDTO (JSON)
+클라이언트
+```
+
+### Mapper 위치 및 역할
+
+#### 위치: `server.mapper` (Controller ↔ Service 경계)
+- **이유**: 
+  - Mapper는 Controller와 Service 사이의 변환을 담당
+  - Client ↔ Server 경계(DTO)와 서버 내부(Entity) 사이의 변환
+  - Controller에서만 호출되며, Service는 사용하지 않음
+
+#### 의존성 방향
+```
+Controller → Mapper → (Entity)
+Service → (Entity)
+```
+
+### MapStruct 설정
+
+#### pom.xml
+```xml
+<properties>
+    <mapstruct.version>1.5.5.Final</mapstruct.version>
+</properties>
+
+<dependencies>
+    <dependency>
+        <groupId>org.mapstruct</groupId>
+        <artifactId>mapstruct</artifactId>
+        <version>${mapstruct.version}</version>
+    </dependency>
+    <dependency>
+        <groupId>org.mapstruct</groupId>
+        <artifactId>mapstruct-processor</artifactId>
+        <version>${mapstruct.version}</version>
+        <scope>provided</scope>
+    </dependency>
+</dependencies>
+```
+
+### 주요 변경 사항
+
+#### Controller 계층
+- **변경 전**: Entity → ResponseDTO 변환 수행
+- **변경 후**: 변환 없음, Mapper만 호출
+
+#### Service 계층
+- **변경 전**: RequestDTO를 받아 Entity로 변환
+- **변경 후**: Entity만 받고 Entity만 반환
+
+#### Mapper 계층 (신규)
+- **위치**: `server.mapper` 패키지
+- **구현**: MapStruct 인터페이스
+- **역할**: 모든 DTO ↔ Entity 변환
+
+### 장점
+
+1. **책임 분리**: 각 계층이 명확한 역할만 담당
+2. **코드 일관성**: 모든 변환이 Mapper를 통해 수행
+3. **타입 안정성**: MapStruct가 컴파일 타임에 검증
+4. **성능**: MapStruct가 생성한 코드는 최적화됨
+5. **테스트 용이성**: Mapper 단위 테스트 가능
+
 ## 중요한 설계 결정사항
 
 ### 1. 테이블 및 컬럼 명명 규칙
@@ -431,9 +627,10 @@ books (1) ← (N) user_books
 - **구조**: 단일 테이블에 모든 버전 저장, `version` 컬럼 사용
 - **이유**: 구현 단순성, 기능적 유연성
 
-### 4. DTO 경계 분리 (3-tier Architecture)
-- **ClientServerDTO** (`server.dto.clientserverDTO`): Client ↔ Server 경계용
-- **ServerDbmsDTO** (`dbms.dto.serverdbmsDTO`): Server ↔ DBMS 경계용
+### 4. DTO 경계 분리 및 MapStruct 기반 변환
+- **Client ↔ Server 경계 DTO** (`server.dto.requestDTO`, `server.dto.responseDTO`): 클라이언트-서버 간 통신용
+- **Entity** (`dbms.entity`): 서버 내부 및 DBMS와의 통신용
+- **Mapper** (`server.mapper`): DTO ↔ Entity 변환 담당 (MapStruct 사용)
 - **이유**: 경계 간 의존성 분리, 명확한 책임 구분, 유지보수성 향상
 
 ### 5. 패키지 구조 (3-tier Architecture)
@@ -457,7 +654,16 @@ books (1) ← (N) user_books
   - 포맷팅 로직은 서버에 포함하지 않음
   - 클라이언트가 각자의 로케일/타임존에 맞게 처리
 
-### 7. 클라이언트 구분 불필요 정책
+### 7. JSON 처리 정책
+- **클라이언트 요구사항**: 클라이언트(웹/앱)가 서버에 데이터를 전송할 때는 **반드시 JSON 형식**으로 보내야 함
+- **서버 설정**: 
+  - `@RestController` 사용으로 자동 JSON 직렬화/역직렬화
+  - `@RequestBody` 사용으로 HTTP 요청 본문을 JSON으로 파싱
+  - Jackson 라이브러리 자동 포함 (`spring-boot-starter-web`)
+- **Content-Type**: `application/json` (기본값)
+- **주의사항**: 클라이언트가 JSON 형식이 아닌 데이터를 보내면 서버에서 처리할 수 없음
+
+### 8. 클라이언트 구분 불필요 정책
 - **핵심 원칙**: 서버 애플리케이션(Controller, Service)은 요청이 웹에서 왔는지 앱에서 왔는지 구분할 필요가 없음
 - **클라이언트-서버 아키텍처의 응답 방식**:
   - 서버는 클라이언트와 직접적인 '연결'을 유지하지 않음
@@ -495,9 +701,17 @@ books (1) ← (N) user_books
 #### 기본 원칙
 - 모든 컨트롤러는 `BaseV1Controller` 상속
 - 클라이언트 요청을 받아 `server.service`에 위임
-- `server.dto.clientserverDTO` 사용 (Request/Response)
+- `server.dto.requestDTO`, `server.dto.responseDTO` 사용
+- **Mapper를 통한 변환**: DTO ↔ Entity 변환은 Mapper 계층에서 처리
 - Swagger 문서화 (`@Tag` 사용)
 - `ApiResponse<T>` 래퍼 사용
+
+#### Controller의 역할
+1. **HTTP 요청/응답 처리**: 클라이언트의 HTTP 요청을 받고 응답을 반환
+2. **요청 파라미터 검증**: `@Valid` 어노테이션을 통한 DTO 검증
+3. **Service 호출**: 비즈니스 로직을 Service에 위임
+4. **Mapper 호출**: DTO ↔ Entity 변환을 Mapper에 위임
+5. **변환 작업 없음**: Controller는 직접적인 변환 작업을 수행하지 않음
 
 #### 컨트롤러 설계 원칙 (SRP - Single Responsibility Principle)
 
@@ -564,11 +778,23 @@ books (1) ← (N) user_books
     - 의존: `BookService`만
     - 인증: 필요
 
+### Mapper (Controller ↔ Service 경계)
+- **위치**: `server.mapper` 패키지
+- **역할**: DTO ↔ Entity 변환 담당
+- **구현**: MapStruct 인터페이스 사용 (컴파일 타임 코드 생성)
+- **호출**: Controller에서만 호출, Service는 사용하지 않음
+- **의존성 방향**: Controller → Mapper (단방향)
+- **주요 Mapper**:
+  - `UserMapper`: User 관련 DTO ↔ Entity 변환
+  - `BookMapper`: Book 관련 DTO ↔ Entity 변환
+  - `AuthMapper`: 인증 관련 DTO ↔ Entity 변환
+
 ### 서비스 (서버 내부)
-- 비즈니스 로직 구현
-- `server.dto.clientserverDTO` ↔ `dbms.dto.serverdbmsDTO` 변환 담당
-- 검증 서비스(`server.service.validation` 패키지) 활용
-- `server.controller`에서 호출되며, `dbms.repository`를 통해 데이터 접근
+- **비즈니스 로직 구현**
+- **Entity만 사용**: Service 계층은 Entity만 사용하며, DTO를 사용하지 않음
+- **변환 책임 없음**: DTO ↔ Entity 변환은 Mapper 계층에서 처리
+- **호출**: `server.controller`에서 호출되며, `dbms.repository`를 통해 데이터 접근
+- **Service 간 통신**: Entity 기반으로 통신
 
 ### Repository (Server ↔ DBMS 경계)
 - `JpaRepository` 확장
@@ -581,8 +807,11 @@ books (1) ← (N) user_books
 1. **테이블 및 컬럼 이름**: 소문자 snake_case 형식 사용 (예: `users`, `user_devices`, `user_id`)
 2. **Git 커밋**: 중요한 변경사항은 커밋 메시지에 명시
 3. **마이그레이션**: 기존 마이그레이션 파일은 수정하지 않음
-4. **DTO 분리**: 경계별 DTO 혼용 금지 (ClientServerDTO와 ServerDbmsDTO 혼용 금지)
-5. **패키지 명명**: 모든 패키지명은 소문자 한 단어로만 구성 (단, DTO 패키지는 가시성을 위해 'DTO' 글자만 대문자 허용, 예: `clientserverDTO`, `requestDTO`, `commandDTO`)
+4. **DTO 분리**: 경계별 DTO 혼용 금지
+5. **패키지 명명**: 모든 패키지명은 소문자 한 단어로만 구성 (단, DTO 패키지는 가시성을 위해 'DTO' 글자만 대문자 허용, 예: `requestDTO`, `responseDTO`)
+6. **Mapper 사용**: 모든 DTO ↔ Entity 변환은 Mapper 계층을 통해 수행
+7. **Service 계층**: Service는 Entity만 사용하며, DTO를 직접 사용하지 않음
+8. **JSON 형식**: 클라이언트는 반드시 JSON 형식으로 데이터를 전송해야 함
 
 ## 참고 자료
 
