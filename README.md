@@ -148,6 +148,11 @@ mvn spring-boot:run
    - 서버 주소: `http://localhost:8080`
    - Swagger UI: `http://localhost:8080/swagger-ui/index.html`
 
+### 데이터베이스 password
+```
+Yenapark1000
+```
+
 ### 데이터베이스 마이그레이션
 
 Flyway를 통해 데이터베이스 스키마가 자동으로 생성됩니다. 애플리케이션 실행 시 `src/main/resources/db/migration/` 디렉토리의 마이그레이션 파일들이 순차적으로 실행됩니다.
