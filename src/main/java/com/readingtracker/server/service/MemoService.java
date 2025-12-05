@@ -116,13 +116,18 @@ public class MemoService {
     
     /**
      * 메모 삭제
+     * 멱등성 보장: 이미 삭제된 메모에 대해서도 성공 응답을 반환하여 동일한 요청을 여러 번 실행해도 결과가 동일하도록 함
      */
     public void deleteMemo(User user, Long memoId) {
         if (memoId == null) {
             throw new IllegalArgumentException("메모 ID는 필수입니다.");
         }
-        Memo memo = memoRepository.findById(memoId)
-            .orElseThrow(() -> new IllegalArgumentException("메모를 찾을 수 없습니다."));
+        Memo memo = memoRepository.findById(memoId).orElse(null);
+        
+        // 이미 삭제된 메모인 경우 성공으로 처리 (멱등성 보장)
+        if (memo == null) {
+            return;
+        }
         
         if (!memo.getUser().getId().equals(user.getId())) {
             throw new IllegalArgumentException("권한이 없습니다.");

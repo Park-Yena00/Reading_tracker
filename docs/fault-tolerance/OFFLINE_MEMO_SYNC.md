@@ -3,6 +3,7 @@
 > **목적**: 네트워크가 없는 환경에서 메모를 작성하고, 네트워크 복구 시 자동으로 서버에 동기화하는 기능 구현  
 > **비기능 품질**: Fault Tolerance (장애 허용)  
 > **시나리오**: 오프라인 상태에서 메모 작성 → 로컬 저장 → 네트워크 복구 시 자동 동기화
+> **데이터 정리 전략**: 하이브리드 전략 (최근 7일 메모 보관, 오래된 메모 자동 정리)
 
 ---
 
@@ -30,14 +31,27 @@
    - 모든 메모는 내 서재(userBookId)에 저장된 책에 대해서만 작성 가능
    - 내용 손실 없이 UI에 즉시 표시
 
-2. **로컬 저장**
+2. **오프라인 환경에서 메모 수정**
+   - 네트워크가 없어도 메모 수정 가능
+   - 기존 메모의 내용, 태그, 페이지 번호 등을 수정 가능
+   - 수정 내용이 즉시 UI에 반영
+   - 동기화 대기 상태로 표시
+
+3. **오프라인 환경에서 메모 삭제**
+   - 네트워크가 없어도 메모 삭제 가능
+   - 삭제된 메모는 UI에서 즉시 제거
+   - 동기화 대기 상태로 표시 (서버에서 실제 삭제되기 전까지)
+
+4. **로컬 저장**
    - 서버에 저장할 수 없으므로 로컬 저장소에 임시 저장
    - 브라우저 재시작 후에도 데이터 유지
+   - 수정/삭제 작업도 로컬에 저장
 
-3. **자동 동기화**
+5. **자동 동기화**
    - 네트워크 재연결 시 자동으로 서버에 동기화
-   - 데이터 손실 없이 모든 메모 저장
+   - 데이터 손실 없이 모든 메모 작업(생성/수정/삭제) 저장
    - 동기화 상태 UI 표시
+   - 작업 순서 보장 (작성 시간 순서대로 동기화)
 
 ### 제약사항
 
@@ -51,20 +65,77 @@
 
 ### 고려사항
 
-1. **로컬 ID 생성**: 서버 ID는 서버에서 생성되므로 임시 ID 필요
-2. **동기화 순서**: 오프라인 메모들은 작성 시간 순으로 동기화
+1. **로컬 ID 생성**: 서버 ID는 서버에서 생성되므로 임시 ID 필요 (생성 시에만)
+2. **동기화 순서**: 오프라인 메모 작업들은 작성 시간 순으로 동기화
 3. **중복 방지**: 동일한 메모가 중복 저장되지 않도록 보장
 4. **부분 실패**: 일부 메모만 동기화 실패 시 재시도 로직
-
-### 관련 시나리오
-
-**멀티 디바이스 오프라인 동기화**: 여러 디바이스(웹, 모바일 앱)에서 오프라인 상태로 작성한 메모가 네트워크 복구 시 모든 디바이스에서 동기화되어 무결성을 유지하는 시나리오에 대해서는 [멀티 디바이스 오프라인 동기화 설계](./MULTI_DEVICE_SYNC.md) 문서를 참조하세요.
+5. **하이브리드 데이터 정리 전략**: 최근 7일 메모는 IndexedDB에 보관하여 오프라인 조회를 지원하고, 오래된 메모는 자동으로 정리하여 용량을 관리
+6. **메모 수정 시 충돌 해결**: 오프라인에서 수정한 메모와 서버의 메모가 다를 경우 처리 전략 필요
+7. **메모 삭제 시 순서 보장**: 메모 수정 후 삭제하는 경우, 수정이 먼저 동기화되어야 함
+8. **서버 ID 필요**: 메모 수정/삭제는 서버에 이미 존재하는 메모에 대한 작업이므로 `serverId` 필요
 
 ---
 
 ## 해결 방법 개요
 
 ### Offline-First 접근법
+
+**핵심 철학**:
+
+Offline-First 아키텍처는 **네트워크를 필수 조건이 아닌, 선택적인 기능으로 간주**하는 것입니다. 이는 전통적인 온라인 우선(Online-First) 접근법과 근본적으로 다른 사고방식입니다.
+
+#### 1. 신뢰의 원천 전환
+
+**전통적인 접근법 (Online-First)**:
+- 서버가 데이터의 신뢰할 수 있는 소스
+- 클라이언트는 서버 응답을 기다려야 UI 업데이트
+- 네트워크가 없으면 애플리케이션 사용 불가
+
+**Offline-First 접근법**:
+- **클라이언트(브라우저)의 로컬 데이터 저장소를 애플리케이션의 기본 데이터 소스로 사용**
+- UI는 서버의 응답을 기다리는 대신 **로컬 데이터를 즉시 렌더링**
+- 서버는 데이터의 최종 저장소이지만, 클라이언트의 기본 데이터 소스는 아님
+
+**구현 예시**:
+```javascript
+// Offline-First 방식
+async createMemo(memoData) {
+    // 1. 로컬 저장소에 먼저 저장 (즉시)
+    const localMemo = await dbManager.saveMemo(memoData);
+    
+    // 2. UI 즉시 업데이트 (서버 응답 대기 없음)
+    renderMemo(localMemo);
+    
+    // 3. 백그라운드에서 서버 동기화 (비동기)
+    if (networkMonitor.isOnline) {
+        syncToServer(localMemo).catch(handleError);
+    }
+}
+```
+
+#### 2. 네트워크의 역할 재정의
+
+**전통적인 접근법**:
+- 네트워크는 애플리케이션 동작의 **전제 조건**
+- 네트워크 없이는 기능 사용 불가
+
+**Offline-First 접근법**:
+- **네트워크는 애플리케이션의 동작을 위한 전제 조건이 아니라, 백그라운드에서 로컬 데이터와 서버 데이터를 동기화(Synchronization)하는 역할로 격상**
+- 네트워크가 없어도 애플리케이션은 정상 동작
+- 네트워크는 데이터 동기화를 위한 선택적 채널
+
+**동작 흐름**:
+```
+[사용자 액션]
+    ↓
+[로컬 저장소에 저장] ← 항상 먼저 실행
+    ↓
+[UI 즉시 업데이트] ← 서버 응답 대기 없음
+    ↓
+[네트워크 상태 확인]
+    ├─ 온라인 → [백그라운드 동기화] ← 선택적
+    └─ 오프라인 → [대기 상태 표시] ← 정상 동작
+```
 
 **핵심 원칙**:
 1. **로컬 우선**: 항상 로컬 저장소에 먼저 저장
@@ -74,6 +145,8 @@
 
 ### 아키텍처 플로우
 
+#### 메모 생성 플로우
+
 ```
 [사용자 메모 작성]
         ↓
@@ -82,7 +155,7 @@
 [UI 즉시 업데이트]
         ↓
 [네트워크 상태 확인]
-        ├─ 온라인 → [동기화 큐에 추가] → [서버로 전송]
+        ├─ 온라인 → [동기화 큐에 추가 (CREATE)] → [서버로 전송]
         └─ 오프라인 → [대기 상태 표시]
                             ↓
                     [네트워크 재연결 감지]
@@ -93,6 +166,65 @@
                             ├─ 성공 → [로컬 메모 업데이트 (서버 ID)]
                             └─ 실패 → [재시도 큐에 추가]
 ```
+
+#### 메모 수정 플로우
+
+```
+[사용자 메모 수정]
+        ↓
+[IndexedDB에서 기존 메모 조회] ← serverId 필요
+        ↓
+[수정 내용 반영] ← 로컬 메모 업데이트
+        ↓
+[기존 동기화 큐 항목 제거] ← 중복 방지
+        ↓
+[동기화 큐에 추가 (UPDATE)] ← serverId 포함
+        ↓
+[UI 즉시 업데이트]
+        ↓
+[네트워크 상태 확인]
+        ├─ 온라인 → [서버로 전송 (PUT /memos/{id})]
+        └─ 오프라인 → [대기 상태 표시]
+                            ↓
+                    [네트워크 재연결 감지]
+                            ↓
+                    [대기 중인 수정 동기화]
+                            ↓
+                    [서버 응답 처리]
+                            ├─ 성공 → [로컬 메모 상태 업데이트 (synced)]
+                            └─ 실패 → [재시도 큐에 추가]
+```
+
+#### 메모 삭제 플로우
+
+```
+[사용자 메모 삭제]
+        ↓
+[IndexedDB에서 기존 메모 조회] ← serverId 필요
+        ↓
+[동기화 큐에 추가 (DELETE)] ← serverId 포함
+        ↓
+[로컬 메모는 삭제 표시만] ← 실제 삭제는 동기화 완료 후
+        ↓
+[UI에서 즉시 제거] ← 낙관적 업데이트
+        ↓
+[네트워크 상태 확인]
+        ├─ 온라인 → [서버로 전송 (DELETE /memos/{id})]
+        └─ 오프라인 → [대기 상태 표시]
+                            ↓
+                    [네트워크 재연결 감지]
+                            ↓
+                    [대기 중인 삭제 동기화]
+                            ↓
+                    [서버 응답 처리]
+                            ├─ 성공 → [로컬 메모 실제 삭제]
+                            └─ 실패 → [재시도 큐에 추가]
+```
+
+**참고**: 아직 동기화되지 않은 메모(serverId가 없는 메모)를 삭제하는 경우:
+- 로컬에서 즉시 삭제
+- 동기화 큐의 CREATE 항목도 제거
+- 서버 동기화 불필요
 
 ### 네트워크 연결 감지 및 자동 동기화 메커니즘
 
@@ -495,9 +627,13 @@ setInterval(async () => {
 // 동기화 큐 구조
 {
   id: "sync-queue-item-id",        // 고유 ID
-  type: "CREATE",                   // 작업 타입 (CREATE, UPDATE, DELETE)
-  localMemoId: "local-memo-id",    // 로컬 임시 ID
-  data: MemoCreateRequest,          // 요청 데이터
+  type: "CREATE" | "UPDATE" | "DELETE",  // 작업 타입
+  localMemoId: "local-memo-id",    // 로컬 임시 ID (CREATE/UPDATE/DELETE 모두)
+  serverMemoId: number | null,     // 서버 메모 ID (UPDATE/DELETE 시 필수)
+  data: object,                     // 요청 데이터
+    // CREATE: MemoCreateRequest
+    // UPDATE: MemoUpdateRequest (id, content, tags, pageNumber, memoStartTime)
+    // DELETE: { id: number }
   status: "PENDING",                // PENDING, SYNCING, SUCCESS, FAILED
   retryCount: 0,                    // 재시도 횟수
   createdAt: Date,                  // 생성 시간
@@ -510,6 +646,930 @@ setInterval(async () => {
 - `navigator.onLine` API
 - `online` / `offline` 이벤트 리스너
 - 주기적인 헬스체크 (선택사항)
+
+#### 4. Service Worker ⭐ (필수)
+
+**Service Worker란**:
+- 브라우저 백그라운드에서 실행되는 자바스크립트 워커
+- 웹 페이지와 네트워크 사이의 프록시 역할을 수행
+- 모든 나가는 네트워크 요청을 가로채고(intercept) 제어 가능
+
+**사용 결정 이유**:
+
+1. **페이지 종료 후 동기화 지원**
+   - Background Sync API를 통한 페이지 종료 후에도 동기화 가능
+   - 사용자가 페이지를 닫아도 메모 동기화가 백그라운드에서 진행
+   - 네트워크 복구 시 자동으로 동기화 재시도
+
+2. **네트워크 요청에 대한 세밀한 제어**
+   - 메모 데이터는 독서 기록 사이트의 핵심 데이터
+   - 오프라인 상태에서 안정적으로 처리하고 온라인 상태에서 효율적으로 서버와 동기화 필요
+   - 네트워크 요청 실패 시 자동 재시도, 우선순위 관리, 요청별 전략 적용 가능
+
+3. **사용자 경험 향상**
+   - 페이지를 닫아도 동기화 진행으로 사용자 대기 시간 감소
+   - 네트워크 불안정 시 자동 재시도로 데이터 손실 방지
+
+**주요 기능**:
+
+1. **Background Sync API**
+   - 페이지가 닫혀도 백그라운드에서 동기화 작업 수행
+   - 네트워크 복구 시 자동으로 동기화 재시도
+
+2. **네트워크 요청 가로채기 (Fetch API)**
+   - 모든 네트워크 요청을 Service Worker가 먼저 처리
+   - 요청별 재시도 전략, 우선순위 관리 가능
+   - **Failure Handling**: 네트워크 실패 시 자동으로 IndexedDB 동기화 큐(Outbox)에 저장
+
+3. **캐시된 응답 제공**
+   - 오프라인 상태에서 캐시된 데이터 반환
+   - 메모 조회(GET) 요청에 활용 가능 (선택적)
+   - **태그 데이터 캐싱 (필수)**: Service Worker의 Cache-First 전략으로 태그 목록 캐싱
+   - **내 서재 정보 캐싱 (필수)**: Service Worker의 Stale-While-Revalidate 전략으로 내 서재 정보 캐싱
+
+**구현 예시**:
+
+```javascript
+// service-worker.js
+
+// 1. Background Sync: 페이지 종료 후 동기화
+self.addEventListener('sync', (event) => {
+    if (event.tag === 'sync-memos') {
+        event.waitUntil(syncPendingMemos());
+    }
+});
+
+// 2. 네트워크 요청 가로채기: 메모 관련 요청 제어
+self.addEventListener('fetch', (event) => {
+    // 메모 관련 요청만 처리
+    if (event.request.url.includes('/api/v1/memos')) {
+        event.respondWith(
+            fetch(event.request)
+                .then(response => {
+                    // 성공 시 응답 처리
+                    if (response.ok && event.request.method === 'GET') {
+                        // GET 요청은 선택적으로 캐싱 (최근 메모 조회용)
+                        const responseClone = response.clone();
+                        caches.open('memos-cache').then(cache => {
+                            cache.put(event.request, responseClone);
+                        });
+                    }
+                    return response;
+                })
+                .catch(error => {
+                    // 네트워크 실패 시 처리 (Failure Handling)
+                    // POST 요청(메모 작성)의 경우: IndexedDB 동기화 큐에 저장
+                    if (event.request.method === 'POST') {
+                        return handleFailedPostRequest(event.request);
+                    }
+                    // PUT 요청(메모 수정)의 경우: IndexedDB 동기화 큐에 저장
+                    if (event.request.method === 'PUT') {
+                        return handleFailedPutRequest(event.request);
+                    }
+                    // DELETE 요청(메모 삭제)의 경우: IndexedDB 동기화 큐에 저장
+                    if (event.request.method === 'DELETE') {
+                        return handleFailedDeleteRequest(event.request);
+                    }
+                    // GET 요청의 경우: 캐시에서 반환 또는 에러 처리
+                    return handleFailedGetRequest(event.request, error);
+                })
+        );
+    } else if (event.request.url.includes('/api/v1/tags') && 
+               event.request.method === 'GET') {
+        // 태그 데이터 캐싱: Service Worker의 Cache-First 전략
+        event.respondWith(
+            caches.open('tags-cache-v1').then(cache => {
+                return cache.match(event.request).then(cachedResponse => {
+                    // 1. 캐시에 있으면 즉시 반환 (Cache-First)
+                    if (cachedResponse) {
+                        return cachedResponse;
+                    }
+                    
+                    // 2. 없으면 네트워크 요청
+                    return fetch(event.request).then(response => {
+                        // 3. 성공 시 캐시에 저장
+                        if (response.ok) {
+                            cache.put(event.request, response.clone());
+                        }
+                        return response;
+                    }).catch(error => {
+                        // 4. 네트워크 실패 시 캐시에서 반환 (오프라인 지원)
+                        return cachedResponse || new Response(JSON.stringify({
+                            ok: false,
+                            error: '태그 데이터를 불러올 수 없습니다.'
+                        }), {
+                            status: 503,
+                            headers: { 'Content-Type': 'application/json' }
+                        });
+                    });
+                });
+            })
+        );
+    } else if (event.request.url.includes('/api/v1/user/books') && 
+               event.request.method === 'GET') {
+        // 내 서재 정보 캐싱: Service Worker의 Stale-While-Revalidate 전략
+        event.respondWith(
+            caches.open('user-shelf-cache-v1').then(cache => {
+                return cache.match(event.request).then(cachedResponse => {
+                    // 1. 백그라운드에서 네트워크 요청 시작 (최신성 보장)
+                    const fetchPromise = fetch(event.request).then(response => {
+                        // 2. 네트워크 응답이 성공하면 캐시 업데이트
+                        if (response.ok) {
+                            cache.put(event.request, response.clone());
+                        }
+                        return response;
+                    }).catch(error => {
+                        console.error('내 서재 정보 네트워크 요청 실패:', error);
+                        // 네트워크 실패 시 에러는 무시 (캐시 응답 사용)
+                    });
+                    
+                    // 3. 캐시에 있으면 즉시 반환 (Stale 허용)
+                    if (cachedResponse) {
+                        // 백그라운드 업데이트는 계속 진행
+                        return cachedResponse;
+                    }
+                    
+                    // 4. 캐시가 없으면 네트워크 응답 대기
+                    return fetchPromise.then(response => {
+                        if (response.ok) {
+                            // 네트워크 응답을 캐시에 저장
+                            cache.put(event.request, response.clone());
+                        }
+                        return response;
+                    }).catch(error => {
+                        // 네트워크 실패 시 에러 응답
+                        return new Response(JSON.stringify({
+                            ok: false,
+                            error: '내 서재 정보를 불러올 수 없습니다.'
+                        }), {
+                            status: 503,
+                            headers: { 'Content-Type': 'application/json' }
+                        });
+                    });
+                });
+            })
+        );
+    } else {
+        // 기타 요청은 그대로 전달
+        event.respondWith(fetch(event.request));
+    }
+});
+
+// POST 요청 실패 처리: IndexedDB 동기화 큐(Outbox)에 저장
+async function handleFailedPostRequest(request) {
+    try {
+        // 요청 본문 파싱
+        const requestBody = await request.clone().json();
+        
+        // IndexedDB에 동기화 큐 항목으로 저장
+        const queueItem = {
+            id: generateId(),
+            type: 'CREATE',
+            data: requestBody,
+            status: 'PENDING',
+            retryCount: 0,
+            error: null,
+            createdAt: new Date().toISOString(),
+            lastRetryAt: null,
+            requestUrl: request.url,
+            requestMethod: request.method
+        };
+        
+        // IndexedDB에 저장
+        await saveToSyncQueue(queueItem);
+        
+        // Background Sync 등록 (네트워크 복구 시 자동 재시도)
+        if ('sync' in self.registration) {
+            await self.registration.sync.register('sync-memos');
+        }
+        
+        // 성공 응답 반환 (사용자에게는 성공처럼 보이게)
+        return new Response(JSON.stringify({
+            ok: true,
+            message: '메모가 오프라인 모드로 저장되었습니다. 네트워크 복구 시 자동 동기화됩니다.'
+        }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    } catch (error) {
+        console.error('Failed to save request to sync queue:', error);
+        // 실패 시 원래 에러 반환
+        return new Response(JSON.stringify({
+            ok: false,
+            error: '네트워크 오류 및 로컬 저장 실패'
+        }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+}
+
+// PUT 요청 실패 처리: IndexedDB 동기화 큐(Outbox)에 저장
+async function handleFailedPutRequest(request) {
+    try {
+        // 요청 본문 파싱
+        const requestBody = await request.clone().json();
+        
+        // URL에서 메모 ID 추출 (예: /api/v1/memos/123)
+        const urlParts = request.url.split('/');
+        const memoId = urlParts[urlParts.length - 1];
+        
+        // IndexedDB에 동기화 큐 항목으로 저장
+        const queueItem = {
+            id: generateId(),
+            type: 'UPDATE',
+            serverMemoId: parseInt(memoId),
+            data: requestBody,
+            status: 'PENDING',
+            retryCount: 0,
+            error: null,
+            createdAt: new Date().toISOString(),
+            lastRetryAt: null,
+            requestUrl: request.url,
+            requestMethod: request.method
+        };
+        
+        // IndexedDB에 저장
+        await saveToSyncQueue(queueItem);
+        
+        // Background Sync 등록 (네트워크 복구 시 자동 재시도)
+        if ('sync' in self.registration) {
+            await self.registration.sync.register('sync-memos');
+        }
+        
+        // 성공 응답 반환 (사용자에게는 성공처럼 보이게)
+        return new Response(JSON.stringify({
+            ok: true,
+            message: '메모 수정이 오프라인 모드로 저장되었습니다. 네트워크 복구 시 자동 동기화됩니다.'
+        }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    } catch (error) {
+        console.error('Failed to save PUT request to sync queue:', error);
+        return new Response(JSON.stringify({
+            ok: false,
+            error: '네트워크 오류 및 로컬 저장 실패'
+        }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+}
+
+// DELETE 요청 실패 처리: IndexedDB 동기화 큐(Outbox)에 저장
+async function handleFailedDeleteRequest(request) {
+    try {
+        // URL에서 메모 ID 추출 (예: /api/v1/memos/123)
+        const urlParts = request.url.split('/');
+        const memoId = urlParts[urlParts.length - 1];
+        
+        // IndexedDB에 동기화 큐 항목으로 저장
+        const queueItem = {
+            id: generateId(),
+            type: 'DELETE',
+            serverMemoId: parseInt(memoId),
+            data: { id: parseInt(memoId) },
+            status: 'PENDING',
+            retryCount: 0,
+            error: null,
+            createdAt: new Date().toISOString(),
+            lastRetryAt: null,
+            requestUrl: request.url,
+            requestMethod: request.method
+        };
+        
+        // IndexedDB에 저장
+        await saveToSyncQueue(queueItem);
+        
+        // Background Sync 등록 (네트워크 복구 시 자동 재시도)
+        if ('sync' in self.registration) {
+            await self.registration.sync.register('sync-memos');
+        }
+        
+        // 성공 응답 반환 (사용자에게는 성공처럼 보이게)
+        return new Response(JSON.stringify({
+            ok: true,
+            message: '메모 삭제가 오프라인 모드로 저장되었습니다. 네트워크 복구 시 자동 동기화됩니다.'
+        }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    } catch (error) {
+        console.error('Failed to save DELETE request to sync queue:', error);
+        return new Response(JSON.stringify({
+            ok: false,
+            error: '네트워크 오류 및 로컬 저장 실패'
+        }), {
+            status: 500,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+}
+
+// GET 요청 실패 처리: 캐시에서 반환
+async function handleFailedGetRequest(request, error) {
+    // 캐시에서 응답 찾기
+    const cachedResponse = await caches.match(request);
+    if (cachedResponse) {
+        return cachedResponse;
+    }
+    // 캐시가 없으면 에러 반환
+    return new Response(JSON.stringify({
+        ok: false,
+        error: '네트워크 오류 및 캐시 없음'
+    }), {
+        status: 503,
+        headers: { 'Content-Type': 'application/json' }
+    });
+}
+
+// IndexedDB 동기화 큐에 저장 (Service Worker 컨텍스트에서 실행)
+async function saveToSyncQueue(queueItem) {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open('reading-tracker', 1);
+        request.onsuccess = () => {
+            const db = request.result;
+            const transaction = db.transaction(['sync_queue'], 'readwrite');
+            const store = transaction.objectStore('sync_queue');
+            const putRequest = store.put(queueItem);
+            putRequest.onsuccess = () => resolve();
+            putRequest.onerror = () => reject(putRequest.error);
+        };
+        request.onerror = () => reject(request.error);
+    });
+}
+
+function generateId() {
+    return 'sync-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+}
+
+// 3. 동기화 함수 (Service Worker 컨텍스트에서 실행)
+// Sync Strategy: 네트워크 복구 시 순서대로 요청 재전송(Replay)
+async function syncPendingMemos() {
+    // 1. 네트워크 상태 확인
+    if (!await checkNetworkStatus()) {
+        console.log('네트워크가 오프라인 상태입니다. 동기화 대기...');
+        return;
+    }
+    
+    // 2. IndexedDB에서 대기 중인 동기화 큐 항목 조회
+    const pendingQueueItems = await getPendingQueueItemsFromIndexedDB();
+    
+    if (pendingQueueItems.length === 0) {
+        console.log('동기화할 항목이 없습니다.');
+        return;
+    }
+    
+    // 3. 순서 보장: memoStartTime 또는 createdAt 기준 정렬
+    pendingQueueItems.sort((a, b) => {
+        const timeA = new Date(a.data.memoStartTime || a.createdAt);
+        const timeB = new Date(b.data.memoStartTime || b.createdAt);
+        return timeA - timeB;
+    });
+    
+    console.log(`동기화할 항목 수: ${pendingQueueItems.length}`);
+    
+    // 4. 순차적으로 동기화 (Replay)
+    for (const queueItem of pendingQueueItems) {
+        try {
+            // 동기화 상태 업데이트
+            await updateQueueItemStatus(queueItem.id, 'SYNCING');
+            
+            // 5. 원본 요청 재현(Replay): 동기화 큐의 데이터로 API 호출
+            const response = await replayRequest(queueItem);
+            
+            if (response.ok) {
+                // 성공: 동기화 큐 항목 상태를 SUCCESS로 업데이트
+                await updateQueueItemStatus(queueItem.id, 'SUCCESS');
+                console.log(`동기화 성공: ${queueItem.id}`);
+            } else {
+                // 실패: 재시도 로직 적용
+                throw new Error(`서버 응답 오류: ${response.status}`);
+            }
+        } catch (error) {
+            console.error(`동기화 실패 (${queueItem.id}):`, error);
+            
+            // 재시도 로직: Exponential Backoff
+            await handleSyncFailure(queueItem, error);
+        }
+    }
+}
+
+// 네트워크 상태 확인 (Service Worker 컨텍스트)
+async function checkNetworkStatus() {
+    try {
+        // 실제 서버 연결 가능 여부 확인 (헬스체크)
+        const response = await fetch('/api/v1/health', {
+            method: 'HEAD',
+            signal: AbortSignal.timeout(3000) // 3초 타임아웃
+        });
+        return response.ok;
+    } catch (error) {
+        return false;
+    }
+}
+
+// 동기화 큐 항목 조회 (Service Worker 컨텍스트)
+async function getPendingQueueItemsFromIndexedDB() {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open('reading-tracker', 1);
+        request.onsuccess = () => {
+            const db = request.result;
+            const transaction = db.transaction(['sync_queue'], 'readonly');
+            const store = transaction.objectStore('sync_queue');
+            const index = store.index('status');
+            const getAllRequest = index.getAll('PENDING');
+            getAllRequest.onsuccess = () => resolve(getAllRequest.result || []);
+            getAllRequest.onerror = () => reject(getAllRequest.error);
+        };
+        request.onerror = () => reject(request.error);
+    });
+}
+
+// 원본 요청 재현(Replay): 동기화 큐의 데이터로 API 호출
+async function replayRequest(queueItem) {
+    const { type, serverMemoId, data, requestUrl, requestMethod } = queueItem;
+    
+    let url, method, body;
+    
+    // 타입에 따라 URL과 메서드 결정
+    switch (type) {
+        case 'CREATE':
+            url = '/api/v1/memos';
+            method = 'POST';
+            body = JSON.stringify(data);
+            break;
+        case 'UPDATE':
+            url = `/api/v1/memos/${serverMemoId}`;
+            method = 'PUT';
+            body = JSON.stringify(data);
+            break;
+        case 'DELETE':
+            url = `/api/v1/memos/${serverMemoId}`;
+            method = 'DELETE';
+            body = null;
+            break;
+        default:
+            // 기존 방식 (requestUrl, requestMethod 사용)
+            url = requestUrl || '/api/v1/memos';
+            method = requestMethod || 'POST';
+            body = data ? JSON.stringify(data) : null;
+    }
+    
+    return fetch(url, {
+        method: method,
+        headers: {
+            'Content-Type': 'application/json',
+            // Authorization 헤더는 Service Worker에서 관리
+            'Authorization': await getAuthToken()
+        },
+        body: body
+    });
+}
+
+// 동기화 큐 항목 상태 업데이트
+async function updateQueueItemStatus(queueItemId, status) {
+    return new Promise((resolve, reject) => {
+        const request = indexedDB.open('reading-tracker', 1);
+        request.onsuccess = () => {
+            const db = request.result;
+            const transaction = db.transaction(['sync_queue'], 'readwrite');
+            const store = transaction.objectStore('sync_queue');
+            const getRequest = store.get(queueItemId);
+            getRequest.onsuccess = () => {
+                const item = getRequest.result;
+                if (item) {
+                    item.status = status;
+                    item.updatedAt = new Date().toISOString();
+                    if (status === 'SYNCING') {
+                        item.lastRetryAt = new Date().toISOString();
+                    }
+                    const putRequest = store.put(item);
+                    putRequest.onsuccess = () => resolve();
+                    putRequest.onerror = () => reject(putRequest.error);
+                } else {
+                    resolve();
+                }
+            };
+            getRequest.onerror = () => reject(getRequest.error);
+        };
+        request.onerror = () => reject(request.error);
+    });
+}
+
+// 동기화 실패 처리: Exponential Backoff 재시도
+async function handleSyncFailure(queueItem, error) {
+    const retryCount = (queueItem.retryCount || 0) + 1;
+    const maxRetries = 3;
+    
+    if (retryCount < maxRetries) {
+        // 재시도 예약: Exponential Backoff (5초, 10초, 20초)
+        const delay = 5000 * Math.pow(2, retryCount - 1);
+        
+        // 큐 항목 업데이트
+        await updateQueueItemWithRetry(queueItem.id, retryCount, error.message);
+        
+        // 지연 후 재시도
+        setTimeout(async () => {
+            // Background Sync 재등록
+            if ('sync' in self.registration) {
+                await self.registration.sync.register('sync-memos');
+            }
+        }, delay);
+    } else {
+        // 최대 재시도 횟수 초과: 실패 상태로 표시
+        await updateQueueItemStatus(queueItem.id, 'FAILED');
+        console.error(`동기화 최종 실패 (재시도 ${retryCount}회): ${queueItem.id}`);
+    }
+}
+```
+
+**페이지에서 Service Worker 등록**:
+
+```javascript
+// app.js 또는 main.js
+if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/service-worker.js')
+        .then(registration => {
+            console.log('Service Worker 등록 성공');
+            
+            // 동기화 요청 등록
+            if ('sync' in registration) {
+                // Background Sync 지원
+                registration.sync.register('sync-memos');
+            } else {
+                // 폴백: online 이벤트 사용
+                window.addEventListener('online', () => {
+                    syncPendingMemos();
+                });
+            }
+        })
+        .catch(error => {
+            console.error('Service Worker 등록 실패:', error);
+        });
+}
+```
+
+**장점**:
+- ✅ 페이지가 닫혀도 백그라운드 동기화 가능 (Background Sync)
+- ✅ 네트워크 요청에 대한 정교한 제어 (재시도, 우선순위 관리)
+- ✅ 오프라인 상태에서도 캐시된 리소스 제공 (선택적)
+- ✅ 메모 데이터의 안정적인 동기화 보장
+
+**Failure Handling (네트워크 실패 처리)**:
+
+**질문**: 사용자가 메모 작성 후 '저장' 버튼을 눌렀는데 네트워크 연결이 없는 경우, Service Worker는 이 요청(API Call)을 가로채고 **IndexedDB의 동기화 큐(Outbox)**에 저장합니까?
+
+**답변**: ✅ **예, 저장합니다.**
+
+**동작 흐름**:
+
+1. **사용자가 '저장' 버튼 클릭**
+   ```javascript
+   // 페이지에서 일반 API 호출
+   fetch('/api/v1/memos', {
+       method: 'POST',
+       headers: { 'Content-Type': 'application/json' },
+       body: JSON.stringify({
+           userBookId: 123,
+           pageNumber: 50,
+           content: "메모 내용",
+           tags: ["태그1"],
+           memoStartTime: "2024-01-01T10:30:00Z"
+       })
+   });
+   ```
+
+2. **Service Worker가 요청 가로채기**
+   ```javascript
+   // Service Worker의 fetch 이벤트에서 처리
+   self.addEventListener('fetch', (event) => {
+       if (event.request.url.includes('/api/v1/memos')) {
+           event.respondWith(
+               fetch(event.request)
+                   .catch(error => {
+                       // 네트워크 실패 시 IndexedDB 동기화 큐에 저장
+                       if (event.request.method === 'POST') {
+                           return handleFailedPostRequest(event.request);
+                       }
+                   })
+           );
+       }
+   });
+   ```
+
+3. **네트워크 실패 시 IndexedDB 동기화 큐(Outbox)에 저장**
+   - 요청 본문을 파싱하여 동기화 큐 항목 생성
+   - IndexedDB의 `sync_queue` 테이블에 저장
+   - Background Sync 등록 (네트워크 복구 시 자동 재시도)
+   - 사용자에게는 성공 응답 반환 (낙관적 업데이트)
+
+**구현 예시** (위 코드에 포함됨):
+```javascript
+// POST 요청 실패 처리: IndexedDB 동기화 큐(Outbox)에 저장
+async function handleFailedPostRequest(request) {
+    // 요청 본문 파싱
+    const requestBody = await request.clone().json();
+    
+    // IndexedDB에 동기화 큐 항목으로 저장
+    const queueItem = {
+        id: generateId(),
+        type: 'CREATE',
+        data: requestBody,
+        status: 'PENDING',
+        retryCount: 0,
+        error: null,
+        createdAt: new Date().toISOString(),
+        lastRetryAt: null,
+        requestUrl: request.url,
+        requestMethod: request.method
+    };
+    
+    // IndexedDB에 저장
+    await saveToSyncQueue(queueItem);
+    
+    // Background Sync 등록 (네트워크 복구 시 자동 재시도)
+    if ('sync' in self.registration) {
+        await self.registration.sync.register('sync-memos');
+    }
+    
+    // 성공 응답 반환 (사용자에게는 성공처럼 보이게)
+    return new Response(JSON.stringify({
+        ok: true,
+        message: '메모가 오프라인 모드로 저장되었습니다. 네트워크 복구 시 자동 동기화됩니다.'
+    }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+    });
+}
+```
+
+**장점**:
+- ✅ 사용자가 일반 API 호출만 하면 됨 (오프라인 처리 로직 불필요)
+- ✅ Service Worker가 자동으로 오프라인 처리
+- ✅ 네트워크 복구 시 자동 재시도
+- ✅ 사용자 경험 향상 (낙관적 업데이트)
+
+**참고**: 본 프로젝트에서는 **하이브리드 접근 방식**을 사용합니다:
+- **메모 작성 시**: 먼저 IndexedDB에 저장하고 동기화 큐에 추가 (Offline-First)
+- **Service Worker**: Background Sync를 통해 나중에 동기화
+- **네트워크 실패 시**: Service Worker가 추가로 동기화 큐에 저장하여 이중 보장
+
+**태그 데이터 캐싱 전략** ⭐ (클라이언트 측: Service Worker):
+
+**⚠️ 레이어별 용어 구분**:
+- **Cache-First, Stale-While-Revalidate**: 클라이언트(Service Worker)의 네트워크 요청 처리 로직을 설명하는 용어
+- **Redis 캐시의 TTL**: 서버(Redis)의 데이터 저장 및 관리 정책을 설명하는 용어
+- 이 섹션은 **클라이언트 측(Service Worker)**의 캐싱 전략을 설명합니다.
+- 서버 측(Redis) 캐싱 정책은 OFFLINE_SYNC_DATA_INTEGRITY_ANALYSIS.md 문서 참조
+
+**데이터 성격**:
+- **개발자 통제 공유 자원**: 개발자가 직접 DB를 수정하지 않는 한 변동이 없음
+- **전역 공유 데이터**: 모든 사용자가 동일한 태그 데이터를 사용
+- **변동성**: 거의 없음 (개발자가 수동으로 변경할 때만 변동)
+- **오프라인 필수 데이터**: 오프라인 메모 작성 시 반드시 필요한 데이터
+
+**전략 선택**: **Service Worker의 Stale-While-Revalidate (SWR) 전략 + Etag 기반 검증** 사용
+
+**전략 선택 이유**:
+
+1. **오프라인 우선성 (Offline-First)**
+   - 태그는 오프라인 메모 작성 시 반드시 필요한 데이터
+   - 캐시된 데이터(v1)가 최신 상태(v2)가 아니더라도, 오프라인 환경에서 사용자 작업을 막지 않는 것이 최우선
+   - SWR은 v1을 보여주면서 백그라운드에서 v2를 가져와 다음번 사용을 위해 캐시를 갱신
+   - 사용자가 최신 태그를 사용할 수 없더라도 즉시 작업을 시작할 수 있게 함
+
+2. **데이터 일관성 보장**
+   - Etag 기반 검증을 추가하여 캐시된 데이터의 최신성 확인
+   - 백그라운드에서 최신 데이터를 가져와 캐시 갱신
+   - 다음 요청 시 최신 데이터 사용 가능
+
+3. **변동성 특성 반영**
+   - 태그 데이터는 변동이 거의 없으므로, 캐시된 데이터가 오래되어도 대부분 최신 상태
+   - 개발자가 변경했을 때만 수동으로 무효화되므로, SWR로 자연스럽게 최신 데이터 확보 가능
+
+**구현 방식** (Service Worker 코드):
+```javascript
+// 태그 데이터: Service Worker의 Stale-While-Revalidate (SWR) 전략 + Etag 기반 검증
+if (event.request.url.includes('/api/v1/tags') && 
+    event.request.method === 'GET') {
+    event.respondWith(
+        caches.open('tags-cache-v1').then(cache => {
+            return cache.match(event.request).then(cachedResponse => {
+                // 1. 백그라운드에서 네트워크 요청 시작 (최신성 보장)
+                const fetchPromise = fetch(event.request).then(response => {
+                    if (response.ok) {
+                        // 2. Etag 기반 검증: 캐시된 데이터와 비교
+                        const cachedEtag = cachedResponse?.headers.get('ETag');
+                        const newEtag = response.headers.get('ETag');
+                        
+                        // 3. Etag가 다르면 캐시 업데이트 (데이터 변경됨)
+                        if (cachedEtag !== newEtag) {
+                            cache.put(event.request, response.clone());
+                        }
+                    }
+                    return response;
+                }).catch(error => {
+                    console.error('태그 데이터 네트워크 요청 실패:', error);
+                    // 네트워크 실패 시 에러는 무시 (캐시 응답 사용)
+                });
+                
+                // 4. 캐시에 있으면 즉시 반환 (Stale 허용 - 오프라인 우선)
+                if (cachedResponse) {
+                    // 백그라운드 업데이트는 계속 진행
+                    return cachedResponse;
+                }
+                
+                // 5. 캐시가 없으면 네트워크 응답 대기
+                return fetchPromise.then(response => {
+                    if (response.ok) {
+                        // 네트워크 응답을 캐시에 저장
+                        cache.put(event.request, response.clone());
+                    }
+                    return response;
+                }).catch(error => {
+                    // 네트워크 실패 시 에러 응답
+                    return new Response(JSON.stringify({
+                        ok: false,
+                        error: '태그 데이터를 불러올 수 없습니다.'
+                    }), {
+                        status: 503,
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+                });
+            });
+        })
+    );
+}
+```
+
+**캐시 무효화 전략**:
+
+**서버 측(Redis) 무효화**: Purger-Driven Invalidation
+- 개발자가 태그 DB를 변경할 때 수동으로 Redis 캐시를 삭제
+- Redis TTL은 7일로 설정 (매우 긴 기간)
+- 자세한 내용은 OFFLINE_SYNC_DATA_INTEGRITY_ANALYSIS.md 문서 참조
+
+**클라이언트 측(Service Worker) 무효화**: 자동 갱신
+- SWR 전략으로 백그라운드에서 자동으로 최신 데이터 가져옴
+- Etag 기반 검증으로 데이터 변경 시 자동 캐시 업데이트
+- 개발자가 Redis를 무효화하면, 다음 네트워크 요청 시 자연스럽게 최신 데이터를 가져옴
+
+**Service Worker의 Stale-While-Revalidate vs Cache-First 비교**:
+
+| 측면 | Service Worker의 Cache-First | Service Worker의 Stale-While-Revalidate |
+|------|------|------------------|
+| **응답 속도** | ✅ 즉시 반환 | ✅ 즉시 반환 (캐시 히트 시) |
+| **오프라인 지원** | ✅ 가능 | ✅ 가능 |
+| **최신성 보장** | ⚠️ 보장 어려움 | ✅ 보장 (백그라운드 업데이트 + Etag) |
+| **오프라인 우선성** | ⚠️ 최신 데이터 없으면 실패 가능 | ✅ Stale 데이터라도 즉시 작업 가능 |
+| **구현 복잡도** | ✅ 단순 | ⚠️ 약간 복잡 (Etag 추가) |
+| **태그 데이터 적합성** | ⚠️ 부적합 (오프라인 필수 데이터) | ✅ **적합** (오프라인 우선 + 최신성 보장) |
+
+**결론**: 태그 데이터는 오프라인 메모 작성 시 필수 데이터이므로, **Service Worker의 Stale-While-Revalidate 전략**이 적합합니다. 최신 태그를 사용할 수 없더라도 즉시 작업을 시작할 수 있게 하면서, 백그라운드에서 최신 데이터를 가져와 다음번 사용을 위해 캐시를 갱신합니다.
+
+**서버 측(Redis) 캐싱과의 관계**:
+- 서버 측에서는 Redis 캐시의 TTL을 7일로 설정하여 태그 데이터를 캐싱합니다 (Purger-Driven Invalidation + Long TTL).
+- 개발자가 태그 DB를 변경할 때 수동으로 Redis 캐시를 무효화합니다.
+- 클라이언트 측(Service Worker)과 서버 측(Redis)은 서로 다른 계층에서 동작하며 상호 보완적입니다.
+- 클라이언트 캐시 히트 시 네트워크 요청이 없고, 클라이언트 캐시 미스 시 서버의 Redis 캐시에서 빠르게 응답합니다.
+- 개발자가 Redis를 무효화하면, Service Worker의 SWR 전략으로 다음 네트워크 요청 시 자연스럽게 최신 데이터를 가져옵니다.
+
+**내 서재 정보 캐싱 전략** ⭐ (클라이언트 측: Service Worker):
+
+**⚠️ 레이어별 용어 구분**:
+- **Cache-First, Network-First, Stale-While-Revalidate**: 클라이언트(Service Worker)의 네트워크 요청 처리 로직을 설명하는 용어
+- **Redis 캐시의 TTL**: 서버(Redis)의 데이터 저장 및 관리 정책을 설명하는 용어
+- 이 섹션은 **클라이언트 측(Service Worker)**의 캐싱 전략을 설명합니다.
+- 서버 측(Redis) 캐싱 정책은 OFFLINE_SYNC_DATA_INTEGRITY_ANALYSIS.md 문서 참조
+
+**데이터 성격**:
+- **사용자 통제 개인 자원**: 사용자만이 개인의 내 서재 정보를 생성, 수정, 삭제할 수 있음
+- **개발자가 절대로 변경하면 안 되는 데이터**
+- **변동성**: 사용자 액션에 따라 빈번히 변경됨 (도서 추가/삭제)
+- **신속한 최신 상태 반영(Freshness)이 중요**: 사용자가 방금 변경한 내용이 즉시 반영되어야 함
+
+**전략 선택**: **Service Worker의 Network-First, Fallback to Cache 전략 + Etag 기반 검증** 사용
+
+**전략 선택 이유**:
+
+1. **최신 상태 보장 (Freshness 우선)**
+   - 내 서재 목록은 사용자가 변경할 수 있는 데이터이므로, 가능한 한 네트워크를 통해 최신 데이터를 가져오려는 시도를 먼저 해야 함
+   - Network-First 전략으로 온라인 상태일 때 오래된 목록을 볼 가능성을 최소화
+   - 사용자가 방금 변경한 내용이 즉시 반영되어야 함
+
+2. **오프라인 접근성 유지**
+   - 네트워크 연결이 완전히 끊겼을 때만 Service Worker의 캐시된 서재 목록을 대체 수단(Fallback)으로 보여줌
+   - 오프라인에서도 메모 작성 가능 (userBookId 검증을 위해 필요)
+
+3. **데이터 일관성 보장**
+   - Etag 기반 검증을 추가하여 캐시된 데이터의 최신성 확인
+   - 네트워크 요청이 성공하면 최신 데이터로 캐시 업데이트
+   - 다음 오프라인 접근 시 최신 데이터 사용 가능
+
+**구현 방식** (Service Worker 코드):
+```javascript
+// Service Worker: 내 서재 정보 Network-First, Fallback to Cache 전략 + Etag 기반 검증
+if (event.request.url.includes('/api/v1/user/books') && 
+    event.request.method === 'GET') {
+    event.respondWith(
+        caches.open('user-shelf-cache-v1').then(cache => {
+            return cache.match(event.request).then(cachedResponse => {
+                // 1. Network-First: 네트워크 요청을 먼저 시도 (최신성 보장)
+                return fetch(event.request).then(response => {
+                    if (response.ok) {
+                        // 2. Etag 기반 검증: 캐시된 데이터와 비교
+                        const cachedEtag = cachedResponse?.headers.get('ETag');
+                        const newEtag = response.headers.get('ETag');
+                        
+                        // 3. Etag가 다르거나 캐시가 없으면 캐시 업데이트
+                        if (cachedEtag !== newEtag || !cachedResponse) {
+                            cache.put(event.request, response.clone());
+                        }
+                    }
+                    return response;
+                }).catch(error => {
+                    // 4. Fallback to Cache: 네트워크 실패 시에만 캐시 사용
+                    console.error('내 서재 정보 네트워크 요청 실패:', error);
+                    
+                    if (cachedResponse) {
+                        // 캐시된 데이터를 대체 수단으로 반환 (오프라인 접근성 유지)
+                        return cachedResponse;
+                    }
+                    
+                    // 캐시도 없으면 에러 응답
+                    return new Response(JSON.stringify({
+                        ok: false,
+                        error: '내 서재 정보를 불러올 수 없습니다.'
+                    }), {
+                        status: 503,
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+                });
+            });
+        })
+    );
+}
+```
+
+**캐시 무효화 전략**:
+
+**서버 측(Redis) 무효화**: Write-Through / Cache Aside Pattern
+- 사용자가 책을 추가/삭제하는 API 호출 완료 시, 서버 애플리케이션에서 즉시 Redis 캐시를 무효화(삭제)
+- 쓰기(Write) 작업이 발생할 때마다 캐시를 삭제하여 최신 상태 보장
+- Redis TTL은 5분~10분으로 짧게 설정 (안전망 역할)
+- 자세한 내용은 OFFLINE_SYNC_DATA_INTEGRITY_ANALYSIS.md 문서 참조
+
+**클라이언트 측(Service Worker) 무효화**: 자동 갱신
+- Network-First 전략으로 네트워크 요청이 성공하면 자동으로 최신 데이터로 캐시 업데이트
+- Etag 기반 검증으로 데이터 변경 시 자동 캐시 업데이트
+- 서버에서 Redis를 무효화하면, 다음 네트워크 요청 시 자연스럽게 최신 데이터를 가져옴
+
+**Service Worker의 Network-First vs Stale-While-Revalidate vs Cache-First 비교**:
+
+| 측면 | Service Worker의 Cache-First | Service Worker의 Stale-While-Revalidate | Service Worker의 Network-First |
+|------|------------|------------------------|------------------------|
+| **응답 속도** | ✅ 즉시 반환 | ✅ 즉시 반환 (캐시 히트 시) | ⚠️ 네트워크 대기 (온라인 시) |
+| **최신성** | ⚠️ 보장 어려움 | ✅ 보장 (백그라운드 업데이트) | ✅ **최우선 보장** (네트워크 우선) |
+| **오프라인 지원** | ✅ 가능 | ✅ 가능 | ✅ 가능 (Fallback to Cache) |
+| **Freshness 우선** | ❌ 부적합 | ⚠️ 부분적 | ✅ **최적** |
+| **구현 복잡도** | ✅ 단순 | ⚠️ 약간 복잡 | ✅ 단순 |
+| **내 서재 정보 적합성** | ❌ 부적합 (최신성 중요) | ⚠️ 부분적 (Stale 허용) | ✅ **적합** (최신성 최우선) |
+
+**결론**: 내 서재 정보는 사용자가 변경할 수 있는 데이터이며 신속한 최신 상태 반영이 중요하므로, **Service Worker의 Network-First, Fallback to Cache 전략**이 적합합니다. 온라인 상태일 때 오래된 목록을 볼 가능성을 최소화하면서, 오프라인 접근성도 유지할 수 있습니다.
+
+**서버 측(Redis) 캐싱과의 관계**:
+- 서버 측에서는 Redis 캐시의 TTL을 5분~10분으로 설정하여 내 서재 정보를 캐싱합니다 (Write-Through / Cache Aside Pattern + Short TTL).
+- 사용자가 책을 추가/삭제하는 API 호출 완료 시, 서버에서 즉시 Redis 캐시를 무효화하여 최신 상태를 보장합니다.
+- 클라이언트 측(Service Worker)과 서버 측(Redis)은 서로 다른 계층에서 동작하며 상호 보완적입니다.
+- 클라이언트는 Network-First 전략으로 네트워크 요청을 우선하므로, 서버의 Redis 캐시 무효화가 즉시 반영됩니다.
+- 오프라인 상태일 때만 클라이언트 캐시를 Fallback으로 사용하여 오프라인 접근성을 유지합니다.
+
+**고려사항**:
+
+1. **HTTPS 요구사항**
+   - Service Worker는 HTTPS 환경에서만 동작 (프로덕션 필수)
+   - 개발 환경: `localhost`에서는 HTTP도 동작
+
+2. **브라우저 호환성**
+   - Background Sync: Chrome/Edge 지원, Firefox 일부 지원, Safari 제한적
+   - 폴백 전략 필요: 미지원 브라우저에서는 `online` 이벤트 사용
+
+3. **구현 복잡도**
+   - 단계적 구현 권장:
+     1. 기본 Service Worker 등록
+     2. Background Sync 추가
+     3. 네트워크 제어 로직 추가
+     4. 캐싱 전략 추가 (선택적)
+
+4. **디버깅**
+   - Chrome DevTools의 Service Worker 디버깅 도구 활용
+   - 상세한 로깅 및 단계적 테스트 필요
+
+**참고**: 
+- 본 프로젝트에서는 페이지 종료 후 동기화와 네트워크 요청에 대한 세밀한 제어가 필요하므로 Service Worker를 필수로 사용합니다. 자세한 내용은 [Offline-First 아키텍처 설계 및 전략](./OFFLINE_FIRST.md) 문서를 참조하세요.
+- **캐싱 전략 레이어 구분**: 클라이언트 측(Service Worker)의 캐싱 전략과 서버 측(Redis)의 캐싱 정책은 서로 다른 계층에서 동작합니다. 자세한 내용은 [오프라인 동기화 데이터 무결성 분석](./OFFLINE_SYNC_DATA_INTEGRITY_ANALYSIS.md) 문서의 Redis 섹션을 참조하세요.
 
 ### 서버 측 처리
 
@@ -554,7 +1614,8 @@ Response: MemoResponse (서버 생성 ID 포함)
   id: string,                   // 고유 ID (UUID)
   type: string,                 // "CREATE" | "UPDATE" | "DELETE"
   localMemoId: string,          // 로컬 메모 ID
-  data: object,                 // 요청 데이터 (MemoCreateRequest 등)
+  serverMemoId: number | null,  // 서버 메모 ID (UPDATE/DELETE 시 필요)
+  data: object,                 // 요청 데이터 (MemoCreateRequest/MemoUpdateRequest 등)
   status: string,               // "PENDING" | "SYNCING" | "SUCCESS" | "FAILED"
   retryCount: number,           // 재시도 횟수
   error: string | null,         // 에러 메시지
@@ -599,6 +1660,7 @@ class IndexedDBManager {
                     memoStore.createIndex('syncStatus', 'syncStatus', { unique: false });
                     memoStore.createIndex('userBookId', 'userBookId', { unique: false });
                     memoStore.createIndex('memoStartTime', 'memoStartTime', { unique: false });
+                    memoStore.createIndex('serverId', 'serverId', { unique: false }); // 하이브리드 전략용
                 }
 
                 // sync_queue 테이블
@@ -638,6 +1700,44 @@ class IndexedDBManager {
             memo.syncStatus = 'synced';
             return store.put(memo);
         }
+    }
+
+    // 로컬 ID로 메모 조회
+    async getMemoByLocalId(localId) {
+        const transaction = this.db.transaction(['offline_memos'], 'readonly');
+        const store = transaction.objectStore('offline_memos');
+        const request = store.get(localId);
+        return new Promise((resolve, reject) => {
+            request.onsuccess = () => resolve(request.result || null);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    // 서버 ID로 메모 조회 (하이브리드 전략용)
+    async getMemoByServerId(serverId) {
+        const transaction = this.db.transaction(['offline_memos'], 'readonly');
+        const store = transaction.objectStore('offline_memos');
+        const index = store.index('serverId');
+        const request = index.get(serverId);
+        return new Promise((resolve, reject) => {
+            request.onsuccess = () => resolve(request.result || null);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    // 동기화 완료된 메모 조회 (하이브리드 전략용)
+    async getSyncedMemos() {
+        const transaction = this.db.transaction(['offline_memos'], 'readonly');
+        const store = transaction.objectStore('offline_memos');
+        const index = store.index('syncStatus');
+        return index.getAll('synced');
+    }
+
+    // 메모 삭제 (하이브리드 전략용)
+    async deleteMemo(localId) {
+        const transaction = this.db.transaction(['offline_memos'], 'readwrite');
+        const store = transaction.objectStore('offline_memos');
+        return store.delete(localId);
     }
 }
 
@@ -714,6 +1814,143 @@ class OfflineMemoService {
     }
 
     /**
+     * 메모 수정 (오프라인 지원)
+     * 1. IndexedDB에서 기존 메모 조회
+     * 2. 수정 내용 반영
+     * 3. 동기화 큐에 UPDATE 항목 추가
+     * 4. 네트워크가 연결되어 있으면 즉시 동기화 시도
+     */
+    async updateMemo(memoId, updateData) {
+        await this.init();
+
+        // memoId가 localId인지 serverId인지 확인
+        let localMemo;
+        if (typeof memoId === 'string' && memoId.startsWith('local-')) {
+            // localId로 조회
+            localMemo = await dbManager.getMemoByLocalId(memoId);
+        } else {
+            // serverId로 조회
+            localMemo = await dbManager.getMemoByServerId(memoId);
+        }
+
+        if (!localMemo) {
+            throw new Error('메모를 찾을 수 없습니다.');
+        }
+
+        // 서버에 동기화된 메모만 수정 가능 (serverId가 있어야 함)
+        if (!localMemo.serverId) {
+            throw new Error('아직 동기화되지 않은 메모는 수정할 수 없습니다. 먼저 동기화를 완료해주세요.');
+        }
+
+        // 수정 내용 반영
+        if (updateData.content !== undefined) {
+            localMemo.content = updateData.content;
+        }
+        if (updateData.tags !== undefined) {
+            localMemo.tags = updateData.tags || [];
+        }
+        if (updateData.pageNumber !== undefined) {
+            localMemo.pageNumber = updateData.pageNumber;
+        }
+        if (updateData.memoStartTime !== undefined) {
+            localMemo.memoStartTime = updateData.memoStartTime;
+        }
+        localMemo.updatedAt = new Date().toISOString();
+        localMemo.syncStatus = 'pending'; // 수정 후 동기화 대기 상태로 변경
+
+        // 기존 동기화 큐 항목이 있으면 제거 (새로운 수정 내용으로 대체)
+        if (localMemo.syncQueueId) {
+            await syncQueueManager.removeQueueItem(localMemo.syncQueueId);
+        }
+
+        // 동기화 큐에 UPDATE 항목 추가
+        const queueItem = await syncQueueManager.enqueue({
+            type: 'UPDATE',
+            localMemoId: localMemo.localId,
+            serverMemoId: localMemo.serverId, // 서버 ID 필요
+            data: {
+                id: localMemo.serverId,
+                content: localMemo.content,
+                tags: localMemo.tags,
+                pageNumber: localMemo.pageNumber,
+                memoStartTime: localMemo.memoStartTime
+            }
+        });
+
+        // syncQueueId 업데이트
+        localMemo.syncQueueId = queueItem.id;
+        await dbManager.saveMemo(localMemo);
+
+        // 네트워크가 연결되어 있으면 즉시 동기화 시도
+        if (networkMonitor.isOnline) {
+            this.syncPendingMemos();
+        }
+
+        return localMemo;
+    }
+
+    /**
+     * 메모 삭제 (오프라인 지원)
+     * 1. IndexedDB에서 기존 메모 조회
+     * 2. 동기화 큐에 DELETE 항목 추가
+     * 3. 로컬 메모는 삭제하지 않고 삭제 표시만 함 (동기화 완료 후 삭제)
+     * 4. 네트워크가 연결되어 있으면 즉시 동기화 시도
+     */
+    async deleteMemo(memoId) {
+        await this.init();
+
+        // memoId가 localId인지 serverId인지 확인
+        let localMemo;
+        if (typeof memoId === 'string' && memoId.startsWith('local-')) {
+            // localId로 조회
+            localMemo = await dbManager.getMemoByLocalId(memoId);
+        } else {
+            // serverId로 조회
+            localMemo = await dbManager.getMemoByServerId(memoId);
+        }
+
+        if (!localMemo) {
+            throw new Error('메모를 찾을 수 없습니다.');
+        }
+
+        // 서버에 동기화된 메모만 삭제 가능 (serverId가 있어야 함)
+        if (!localMemo.serverId) {
+            // 아직 동기화되지 않은 메모는 로컬에서 즉시 삭제
+            await dbManager.deleteMemo(localMemo.localId);
+            
+            // 동기화 큐에 CREATE 항목이 있으면 제거
+            if (localMemo.syncQueueId) {
+                await syncQueueManager.removeQueueItem(localMemo.syncQueueId);
+            }
+            
+            return { deleted: true, localOnly: true };
+        }
+
+        // 동기화 큐에 DELETE 항목 추가
+        const queueItem = await syncQueueManager.enqueue({
+            type: 'DELETE',
+            localMemoId: localMemo.localId,
+            serverMemoId: localMemo.serverId, // 서버 ID 필요
+            data: {
+                id: localMemo.serverId
+            }
+        });
+
+        // 로컬 메모는 삭제 표시만 하고 실제 삭제는 동기화 완료 후
+        localMemo.syncStatus = 'pending'; // 삭제 대기 상태
+        localMemo.syncQueueId = queueItem.id;
+        localMemo.updatedAt = new Date().toISOString();
+        await dbManager.saveMemo(localMemo);
+
+        // 네트워크가 연결되어 있으면 즉시 동기화 시도
+        if (networkMonitor.isOnline) {
+            this.syncPendingMemos();
+        }
+
+        return { deleted: false, localOnly: false, localMemo };
+    }
+
+    /**
      * 모든 오프라인 메모 조회 (UI 표시용)
      */
     async getAllMemos() {
@@ -735,6 +1972,45 @@ class OfflineMemoService {
     }
 
     /**
+     * 서버 메모를 로컬 메모로 저장 (하이브리드 전략)
+     * 최근 7일 메모만 IndexedDB에 저장
+     */
+    async saveServerMemoAsLocal(serverMemo) {
+        await this.init();
+
+        // 이미 존재하는 메모인지 확인 (serverId로)
+        const existingMemo = await dbManager.getMemoByServerId(serverMemo.id);
+        if (existingMemo) {
+            // 이미 존재하면 업데이트
+            existingMemo.content = serverMemo.content;
+            existingMemo.tags = serverMemo.tags || [];
+            existingMemo.pageNumber = serverMemo.pageNumber;
+            existingMemo.memoStartTime = serverMemo.memoStartTime || serverMemo.createdAt;
+            existingMemo.updatedAt = new Date().toISOString();
+            await dbManager.saveMemo(existingMemo);
+            return existingMemo;
+        }
+
+        // 새 메모로 저장
+        const localMemo = {
+            localId: this.generateLocalId(),
+            serverId: serverMemo.id,
+            userBookId: serverMemo.userBookId,
+            pageNumber: serverMemo.pageNumber,
+            content: serverMemo.content,
+            tags: serverMemo.tags || [],
+            memoStartTime: serverMemo.memoStartTime || serverMemo.createdAt,
+            syncStatus: 'synced', // 서버에서 가져온 메모는 이미 동기화 완료
+            createdAt: serverMemo.createdAt || new Date().toISOString(),
+            updatedAt: serverMemo.updatedAt || new Date().toISOString(),
+            syncQueueId: null
+        };
+
+        await dbManager.saveMemo(localMemo);
+        return localMemo;
+    }
+
+    /**
      * 로컬 ID 생성 (UUID v4)
      */
     generateLocalId() {
@@ -747,6 +2023,7 @@ class OfflineMemoService {
 
     /**
      * 대기 중인 메모 동기화
+     * 동기화 큐에서 PENDING 항목을 가져와서 처리
      */
     async syncPendingMemos() {
         if (!networkMonitor.isOnline) {
@@ -754,58 +2031,168 @@ class OfflineMemoService {
             return;
         }
 
-        const pendingMemos = await dbManager.getPendingMemos();
-        console.log(`동기화할 메모 수: ${pendingMemos.length}`);
+        // 동기화 큐에서 PENDING 항목 조회
+        const pendingQueueItems = await syncQueueManager.getPendingItems();
+        console.log(`동기화할 항목 수: ${pendingQueueItems.length}`);
 
-        for (const memo of pendingMemos) {
+        // 순서 보장: createdAt 기준 정렬
+        pendingQueueItems.sort((a, b) => {
+            const timeA = new Date(a.createdAt);
+            const timeB = new Date(b.createdAt);
+            return timeA - timeB;
+        });
+
+        for (const queueItem of pendingQueueItems) {
             try {
-                await this.syncSingleMemo(memo);
+                await this.syncQueueItem(queueItem);
             } catch (error) {
-                console.error(`메모 동기화 실패 (${memo.localId}):`, error);
+                console.error(`동기화 실패 (${queueItem.id}):`, error);
                 // 재시도 로직은 syncQueueManager에서 처리
             }
         }
     }
 
     /**
-     * 단일 메모 동기화
+     * 동기화 큐 항목 처리 (CREATE/UPDATE/DELETE)
      */
-    async syncSingleMemo(localMemo) {
-        // 동기화 상태 업데이트
+    async syncQueueItem(queueItem) {
+        // 동기화 큐 항목 상태 업데이트
+        await syncQueueManager.updateStatus(queueItem.id, 'SYNCING');
+
+        try {
+            let response;
+            let localMemo;
+
+            // 동기화 큐 항목 타입에 따라 처리
+            switch (queueItem.type) {
+                case 'CREATE':
+                    // 메모 생성
+                    localMemo = await dbManager.getMemoByLocalId(queueItem.localMemoId);
+                    if (!localMemo) {
+                        throw new Error('로컬 메모를 찾을 수 없습니다.');
+                    }
+
         localMemo.syncStatus = 'syncing';
         await dbManager.saveMemo(localMemo);
 
-        try {
-            // 서버 API 호출
-            const response = await apiClient.post('/memos', {
-                userBookId: localMemo.userBookId,
-                pageNumber: localMemo.pageNumber,
-                content: localMemo.content,
-                tags: localMemo.tags,
-                memoStartTime: localMemo.memoStartTime
-            });
+                    response = await apiClient.post('/memos', queueItem.data);
 
             // 서버 ID로 업데이트
             await dbManager.updateMemoWithServerId(localMemo.localId, response.data.id);
+                    localMemo = await dbManager.getMemoByLocalId(queueItem.localMemoId);
+
+                    // ✅ 하이브리드 전략: 최근 7일 메모만 보관
+                    const sevenDaysAgo = new Date();
+                    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+                    const memoDate = new Date(localMemo.memoStartTime);
+
+                    if (memoDate < sevenDaysAgo) {
+                        await dbManager.deleteMemo(localMemo.localId);
+                        console.log(`메모 동기화 성공 및 삭제 (오래된 메모): ${localMemo.localId} → ${response.data.id}`);
+                    } else {
+                        localMemo.syncStatus = 'synced';
+                        await dbManager.saveMemo(localMemo);
+                        console.log(`메모 동기화 성공 (보관): ${localMemo.localId} → ${response.data.id}`);
+                    }
+                    break;
+
+                case 'UPDATE':
+                    // 메모 수정
+                    localMemo = await dbManager.getMemoByLocalId(queueItem.localMemoId);
+                    if (!localMemo) {
+                        throw new Error('로컬 메모를 찾을 수 없습니다.');
+                    }
+
+                    if (!localMemo.serverId) {
+                        throw new Error('서버 ID가 없어 수정할 수 없습니다.');
+                    }
+
+                    localMemo.syncStatus = 'syncing';
+                    await dbManager.saveMemo(localMemo);
+
+                    response = await apiClient.put(`/memos/${queueItem.serverMemoId}`, queueItem.data);
+
+                    // 수정 완료 후 상태 업데이트
+                    localMemo.syncStatus = 'synced';
+                    localMemo.updatedAt = new Date().toISOString();
+                    await dbManager.saveMemo(localMemo);
+                    console.log(`메모 수정 동기화 성공: ${localMemo.localId} → ${queueItem.serverMemoId}`);
+                    break;
+
+                case 'DELETE':
+                    // 메모 삭제
+                    localMemo = await dbManager.getMemoByLocalId(queueItem.localMemoId);
+                    if (!localMemo) {
+                        // 이미 삭제된 경우 큐 항목만 제거
+                        await syncQueueManager.markAsSuccess(queueItem.id);
+                        console.log(`메모가 이미 삭제됨: ${queueItem.serverMemoId}`);
+                        return;
+                    }
+
+                    if (!localMemo.serverId) {
+                        throw new Error('서버 ID가 없어 삭제할 수 없습니다.');
+                    }
+
+                    localMemo.syncStatus = 'syncing';
+                    await dbManager.saveMemo(localMemo);
+
+                    response = await apiClient.delete(`/memos/${queueItem.serverMemoId}`);
+
+                    // 삭제 완료 후 로컬에서도 삭제
+                    await dbManager.deleteMemo(localMemo.localId);
+                    console.log(`메모 삭제 동기화 성공: ${localMemo.localId} → ${queueItem.serverMemoId}`);
+                    break;
+
+                default:
+                    throw new Error(`알 수 없는 동기화 타입: ${queueItem.type}`);
+            }
 
             // 동기화 큐에서 제거
-            if (localMemo.syncQueueId) {
-                await syncQueueManager.markAsSuccess(localMemo.syncQueueId);
-            }
-
-            console.log(`메모 동기화 성공: ${localMemo.localId} → ${response.data.id}`);
+            await syncQueueManager.markAsSuccess(queueItem.id);
         } catch (error) {
             // 동기화 실패 처리
+            if (queueItem.localMemoId) {
+                const localMemo = await dbManager.getMemoByLocalId(queueItem.localMemoId);
+                if (localMemo) {
             localMemo.syncStatus = 'failed';
             await dbManager.saveMemo(localMemo);
-
-            // 동기화 큐에 에러 기록 및 재시도 예약
-            if (localMemo.syncQueueId) {
-                await syncQueueManager.markAsFailed(localMemo.syncQueueId, error.message);
+                }
             }
 
+            // 동기화 큐에 에러 기록 및 재시도 예약
+            await syncQueueManager.markAsFailed(queueItem.id, error.message);
             throw error;
         }
+    }
+
+    /**
+     * 주기적 정리 작업 (하이브리드 전략)
+     * 30일 이상 된 동기화 완료 메모 삭제
+     */
+    async periodicCleanup() {
+        await this.init();
+
+        const thirtyDaysAgo = new Date();
+        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+        // 동기화 완료된 메모 조회
+        const syncedMemos = await dbManager.getSyncedMemos();
+
+        let deletedCount = 0;
+        for (const memo of syncedMemos) {
+            const updatedAt = new Date(memo.updatedAt);
+            if (updatedAt < thirtyDaysAgo) {
+                // 30일 이상 된 동기화 완료 메모 삭제
+                await dbManager.deleteMemo(memo.localId);
+                deletedCount++;
+            }
+        }
+
+        if (deletedCount > 0) {
+            console.log(`주기적 정리 완료: ${deletedCount}개의 오래된 메모 삭제`);
+        }
+
+        return deletedCount;
     }
 }
 
@@ -832,6 +2219,7 @@ class SyncQueueManager {
             id: this.generateId(),
             type: item.type,
             localMemoId: item.localMemoId,
+            serverMemoId: item.serverMemoId || null, // UPDATE/DELETE 시 필요
             data: item.data,
             status: 'PENDING',
             retryCount: 0,
@@ -845,6 +2233,32 @@ class SyncQueueManager {
         await store.put(queueItem);
 
         return queueItem;
+    }
+
+    /**
+     * 동기화 큐 항목 상태 업데이트
+     */
+    async updateStatus(queueId, status) {
+        const transaction = dbManager.db.transaction(['sync_queue'], 'readwrite');
+        const store = transaction.objectStore('sync_queue');
+        const item = await store.get(queueId);
+        if (item) {
+            item.status = status;
+            item.updatedAt = new Date().toISOString();
+            if (status === 'SYNCING') {
+                item.lastRetryAt = new Date().toISOString();
+            }
+            await store.put(item);
+        }
+    }
+
+    /**
+     * 동기화 큐 항목 제거
+     */
+    async removeQueueItem(queueId) {
+        const transaction = dbManager.db.transaction(['sync_queue'], 'readwrite');
+        const store = transaction.objectStore('sync_queue');
+        await store.delete(queueId);
     }
 
     /**
@@ -1003,6 +2417,7 @@ class MemoService {
 
     /**
      * 메모 목록 조회 (로컬 + 서버 통합)
+     * 하이브리드 전략: 최근 7일 메모만 IndexedDB에 저장
      */
     async getMemos(userBookId, date) {
         // 로컬 메모 조회
@@ -1016,6 +2431,21 @@ class MemoService {
                 });
                 const serverMemos = serverResponse.data;
 
+                // ✅ 하이브리드 전략: 최근 7일 메모만 IndexedDB에 저장
+                const today = new Date();
+                const sevenDaysAgo = new Date(today);
+                sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+                for (const serverMemo of serverMemos) {
+                    const memoDate = new Date(serverMemo.memoStartTime || serverMemo.createdAt);
+                    
+                    // 최근 7일 메모만 IndexedDB에 저장 (오프라인 조회용)
+                    if (memoDate >= sevenDaysAgo) {
+                        await offlineMemoService.saveServerMemoAsLocal(serverMemo);
+                    }
+                    // 오래된 메모는 저장하지 않음 (서버에서만 조회)
+                }
+
                 // 로컬 메모와 서버 메모 통합
                 return this.mergeMemos(localMemos, serverMemos);
             } catch (error) {
@@ -1024,6 +2454,7 @@ class MemoService {
             }
         } else {
             // 오프라인 상태면 로컬 메모만 반환
+            // (최근 7일 메모가 IndexedDB에 저장되어 있음)
             return this.mapLocalMemosToResponse(localMemos);
         }
     }
@@ -1096,6 +2527,34 @@ export const memoService = new MemoService();
 
 ## 동기화 전략
 
+### 데이터 동기화 전략 개요
+
+**데이터 동기화 전략**은 로컬 데이터와 서버 데이터의 정합성을 유지하기 위한 전략입니다. Offline-First 아키텍처에서 핵심적인 역할을 합니다.
+
+**핵심 원리**:
+1. **로컬 우선 저장**: 사용자가 오프라인 상태에서 데이터를 변경했을 때 이를 로컬에 저장해두었다가, 온라인이 되면 서버에 전송
+2. **정합성 유지**: 로컬 데이터와 서버 데이터 간의 일관성 보장
+3. **충돌 해결**: 동시 수정 시 발생할 수 있는 충돌 처리
+
+**동작 흐름**:
+```
+[오프라인 상태에서 데이터 변경]
+    ↓
+[로컬 저장소에 저장] ← 즉시 실행
+    ↓
+[동기화 큐에 추가] ← 대기 상태
+    ↓
+[네트워크 복구 감지]
+    ↓
+[서버에 전송] ← 백그라운드 동기화
+    ↓
+[서버 응답 처리]
+    ├─ 성공 → 로컬 데이터 업데이트 (서버 ID 매핑)
+    └─ 실패 → 재시도 큐에 추가
+```
+
+**구현 전략**:
+
 ### 1. 즉시 동기화 (낙관적 업데이트)
 
 - 메모 작성 즉시 로컬 저장
@@ -1114,10 +2573,201 @@ export const memoService = new MemoService();
 - 네트워크 복구 시 모든 대기 중인 메모 순차 동기화
 - 순서 보장: `memoStartTime` 기준 정렬 후 동기화
 
+### 6. Service Worker Sync Strategy (동기화 전략) ⭐
+
+**전략 개요**: Service Worker가 백그라운드에서 네트워크 상태를 감시하고, 동기화 큐에 저장된 모든 오프라인 요청들을 순서대로 서버에 전송(Replay)하는 세밀한 제어 전략입니다.
+
+**핵심 원칙**:
+
+1. **네트워크 상태 감시**
+   - Service Worker가 백그라운드에서 주기적으로 네트워크 상태 확인
+   - Background Sync API를 통한 네트워크 복구 감지
+   - 실제 서버 연결 가능 여부 확인 (헬스체크)
+
+2. **순서 보장 동기화**
+   - 동기화 큐에서 요청을 순서대로 꺼내어 처리
+   - `memoStartTime` 또는 `createdAt` 기준 정렬
+   - 한 번에 하나씩 순차적으로 처리 (동시성 제어)
+
+3. **요청 재현(Replay)**
+   - 동기화 큐에 저장된 원본 요청 데이터로 API 호출
+   - 원본 요청 URL, Method, Body 그대로 재전송
+   - 인증 토큰 등 필요한 헤더 자동 추가
+
+4. **세밀한 제어**
+   - 재시도 전략: Exponential Backoff (5초, 10초, 20초)
+   - 최대 재시도 횟수: 3회
+   - 부분 실패 처리: 일부 실패해도 나머지 계속 진행
+   - 상태 관리: PENDING → SYNCING → SUCCESS/FAILED
+
+**동작 흐름**:
+
+```
+[네트워크 복구 감지]
+    ↓
+[Background Sync 이벤트 발생]
+    ↓
+[Service Worker: syncPendingMemos() 호출]
+    ↓
+[1. 네트워크 상태 확인]
+    ├─ 오프라인 → 대기
+    └─ 온라인 → 다음 단계
+    ↓
+[2. 동기화 큐에서 PENDING 항목 조회]
+    ↓
+[3. 순서 보장: memoStartTime 기준 정렬]
+    ↓
+[4. 순차적으로 각 항목 처리]
+    for each queueItem:
+        [4-1] 상태 업데이트: PENDING → SYNCING
+        ↓
+        [4-2] 요청 재현(Replay): 원본 요청 데이터로 API 호출
+        ↓
+        [4-3] 응답 처리]
+            ├─ 성공 → 상태: SUCCESS, 큐에서 제거 또는 유지
+            └─ 실패 → 재시도 로직 적용
+                ├─ 재시도 가능 → Exponential Backoff 후 재시도
+                └─ 최대 재시도 초과 → 상태: FAILED
+    ↓
+[5. 동기화 완료]
+```
+
+**구현 예시** (위 Service Worker 코드에 포함됨):
+
+```javascript
+// Service Worker: Background Sync 이벤트 처리
+self.addEventListener('sync', (event) => {
+    if (event.tag === 'sync-memos') {
+        event.waitUntil(syncPendingMemos());
+    }
+});
+
+// 동기화 전략 실행
+async function syncPendingMemos() {
+    // 1. 네트워크 상태 확인
+    if (!await checkNetworkStatus()) {
+        return; // 오프라인 상태면 대기
+    }
+    
+    // 2. 동기화 큐에서 PENDING 항목 조회
+    const pendingQueueItems = await getPendingQueueItemsFromIndexedDB();
+    
+    // 3. 순서 보장: memoStartTime 기준 정렬
+    pendingQueueItems.sort((a, b) => {
+        const timeA = new Date(a.data.memoStartTime || a.createdAt);
+        const timeB = new Date(b.data.memoStartTime || b.createdAt);
+        return timeA - timeB;
+    });
+    
+    // 4. 순차적으로 요청 재현(Replay)
+    for (const queueItem of pendingQueueItems) {
+        try {
+            await updateQueueItemStatus(queueItem.id, 'SYNCING');
+            
+            // 원본 요청 재현
+            const response = await replayRequest(queueItem);
+            
+            if (response.ok) {
+                await updateQueueItemStatus(queueItem.id, 'SUCCESS');
+            } else {
+                throw new Error(`서버 응답 오류: ${response.status}`);
+            }
+        } catch (error) {
+            // 재시도 로직 적용
+            await handleSyncFailure(queueItem, error);
+        }
+    }
+}
+```
+
+**주기적 네트워크 감시**:
+
+```javascript
+// Service Worker: 주기적으로 네트워크 상태 확인
+setInterval(async () => {
+    const isOnline = await checkNetworkStatus();
+    if (isOnline) {
+        // 대기 중인 동기화 항목이 있으면 Background Sync 등록
+        const pendingCount = await getPendingQueueItemCount();
+        if (pendingCount > 0) {
+            await self.registration.sync.register('sync-memos');
+        }
+    }
+}, 30000); // 30초마다 확인
+```
+
+**장점**:
+- ✅ 백그라운드에서 자동 동기화 (사용자 개입 불필요)
+- ✅ 순서 보장 (작성 시간 순서대로 동기화)
+- ✅ 세밀한 제어 (재시도, 우선순위, 상태 관리)
+- ✅ 안정적인 동기화 (부분 실패 처리, 재시도 전략)
+
+**고려사항**:
+- Background Sync는 브라우저가 네트워크 복구를 감지할 때 자동으로 트리거됨
+- 주기적 감시는 추가 보완책으로 사용 (30초 간격)
+- 동기화 큐의 크기가 클 경우 배치 처리 고려
+
 ### 4. 부분 실패 처리
 
 - 일부 메모만 동기화 실패해도 나머지는 계속 진행
 - 실패한 메모는 재시도 큐에 추가
+
+### 5. 하이브리드 데이터 정리 전략 ⭐
+
+**전략 개요**: 최근 메모는 IndexedDB에 보관하여 오프라인 조회를 지원하고, 오래된 메모는 자동으로 정리하여 용량을 관리합니다.
+
+**핵심 원칙**:
+1. **최근 메모 보관**: 최근 7일 이내 메모는 IndexedDB에 보관 (오프라인 조회 지원)
+2. **오래된 메모 정리**: 30일 이상 된 동기화 완료 메모는 자동 삭제
+3. **동기화 대기 메모 유지**: 동기화 대기/실패 메모는 재시도를 위해 유지
+
+**구현 방식**:
+
+```javascript
+// 동기화 완료 후 처리
+async afterSyncComplete(localMemo, serverMemo) {
+    // 1. 서버 ID 업데이트
+    await dbManager.updateMemoWithServerId(localMemo.localId, serverMemo.id);
+    
+    // 2. 하이브리드 전략: 최근 7일 메모만 보관
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    const memoDate = new Date(localMemo.memoStartTime);
+    
+    if (memoDate < sevenDaysAgo) {
+        // 7일 이상 된 메모는 삭제 (서버에서 조회 가능)
+        await dbManager.deleteMemo(localMemo.localId);
+    } else {
+        // 최근 7일 메모는 보관 (오프라인 조회용)
+        // syncStatus는 'synced'로 유지
+    }
+}
+
+// 주기적 정리 작업
+async periodicCleanup() {
+    // 30일 이상 된 동기화 완료 메모 삭제
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    
+    const syncedMemos = await dbManager.getSyncedMemos();
+    for (const memo of syncedMemos) {
+        const updatedAt = new Date(memo.updatedAt);
+        if (updatedAt < thirtyDaysAgo) {
+            await dbManager.deleteMemo(memo.localId);
+        }
+    }
+}
+```
+
+**장점**:
+- ✅ 최근 메모는 오프라인에서도 조회 가능
+- ✅ 용량 자동 관리 (오래된 메모 삭제)
+- ✅ 성능 유지 (IndexedDB 크기 제한)
+- ✅ 사용자 경험 향상 (오프라인에서도 최근 메모 확인 가능)
+
+**보관 기간 설정**:
+- 최근 메모 보관 기간: 7일 (필요에 따라 조정 가능)
+- 자동 정리 기간: 30일 (필요에 따라 조정 가능)
 
 ---
 
@@ -1126,15 +2776,135 @@ export const memoService = new MemoService();
 ### 시나리오
 
 **충돌이 발생하지 않는 경우**:
-- 오프라인 메모는 모두 "생성(CREATE)" 작업
-- 서버에서 ID를 생성하므로 중복 생성 문제 없음
+- 오프라인 메모 생성(CREATE): 서버에서 ID를 생성하므로 중복 생성 문제 없음
+- 오프라인 메모 삭제(DELETE): 서버에서 삭제하므로 중복 삭제 문제 없음
 - 동일한 메모를 두 번 작성한 경우는 사용자 의도로 간주
+
+**충돌이 발생할 수 있는 경우**:
+- 메모 수정(UPDATE): 오프라인에서 수정한 메모와 서버의 메모가 다를 경우
+  - 예: 오프라인에서 메모 A를 수정 → 네트워크 복구 전에 다른 디바이스에서 메모 A를 수정 → 동기화 시 충돌 가능
+
+### 충돌 해결 전략
+
+#### 1. Last-Write-Wins (마지막 쓰기 우선) 전략 ⭐ (권장)
+
+**원칙**: 가장 최근에 수정한 내용을 우선으로 적용
+
+**동작 방식**:
+1. 오프라인에서 메모 수정 시 `updatedAt` 타임스탬프 저장
+2. 동기화 시 서버의 `updatedAt`과 비교
+3. 로컬 `updatedAt`이 더 최신이면 로컬 내용으로 덮어쓰기
+4. 서버 `updatedAt`이 더 최신이면 서버 내용으로 덮어쓰기
+
+**구현 예시**:
+```javascript
+async syncUpdateMemo(queueItem, localMemo) {
+    try {
+        // 서버에서 최신 메모 조회
+        const serverMemo = await apiClient.get(`/memos/${queueItem.serverMemoId}`);
+        
+        // updatedAt 비교
+        const localUpdatedAt = new Date(localMemo.updatedAt);
+        const serverUpdatedAt = new Date(serverMemo.updatedAt);
+        
+        if (localUpdatedAt > serverUpdatedAt) {
+            // 로컬이 더 최신 → 로컬 내용으로 서버 업데이트
+            await apiClient.put(`/memos/${queueItem.serverMemoId}`, queueItem.data);
+        } else if (serverUpdatedAt > localUpdatedAt) {
+            // 서버가 더 최신 → 서버 내용으로 로컬 업데이트
+            localMemo.content = serverMemo.content;
+            localMemo.tags = serverMemo.tags;
+            localMemo.pageNumber = serverMemo.pageNumber;
+            localMemo.updatedAt = serverMemo.updatedAt;
+            await dbManager.saveMemo(localMemo);
+            
+            // 사용자에게 알림 (선택적)
+            console.warn('서버의 최신 내용으로 업데이트되었습니다.');
+        } else {
+            // 동일한 시간 → 로컬 내용으로 업데이트
+            await apiClient.put(`/memos/${queueItem.serverMemoId}`, queueItem.data);
+        }
+    } catch (error) {
+        // 충돌 해결 실패 시 재시도
+        throw error;
+    }
+}
+```
+
+**장점**:
+- ✅ 구현 단순
+- ✅ 자동 충돌 해결
+- ✅ 사용자 개입 불필요
+
+**단점**:
+- ⚠️ 데이터 손실 가능성 (나중에 수정한 내용이 이전 수정을 덮어씀)
+
+#### 2. 사용자 확인 전략 (선택적)
+
+**원칙**: 충돌 발생 시 사용자에게 선택권 제공
+
+**동작 방식**:
+1. 충돌 감지 시 사용자에게 알림
+2. 로컬 내용과 서버 내용을 모두 표시
+3. 사용자가 선택 (로컬 유지 / 서버 유지 / 수동 병합)
+
+**구현 예시**:
+```javascript
+async syncUpdateMemoWithConflictResolution(queueItem, localMemo) {
+    try {
+        const serverMemo = await apiClient.get(`/memos/${queueItem.serverMemoId}`);
+        
+        const localUpdatedAt = new Date(localMemo.updatedAt);
+        const serverUpdatedAt = new Date(serverMemo.updatedAt);
+        
+        if (localUpdatedAt > serverUpdatedAt) {
+            // 로컬이 더 최신 → 정상 업데이트
+            await apiClient.put(`/memos/${queueItem.serverMemoId}`, queueItem.data);
+        } else if (serverUpdatedAt > localUpdatedAt) {
+            // 충돌 감지 → 사용자 확인
+            const userChoice = await showConflictResolutionDialog({
+                local: localMemo,
+                server: serverMemo
+            });
+            
+            if (userChoice === 'local') {
+                await apiClient.put(`/memos/${queueItem.serverMemoId}`, queueItem.data);
+            } else if (userChoice === 'server') {
+                localMemo.content = serverMemo.content;
+                localMemo.tags = serverMemo.tags;
+                localMemo.pageNumber = serverMemo.pageNumber;
+                localMemo.updatedAt = serverMemo.updatedAt;
+                await dbManager.saveMemo(localMemo);
+            } else if (userChoice === 'merge') {
+                // 수동 병합 로직
+                const mergedMemo = await mergeMemos(localMemo, serverMemo);
+                await apiClient.put(`/memos/${queueItem.serverMemoId}`, mergedMemo);
+                await dbManager.saveMemo(mergedMemo);
+            }
+        }
+    } catch (error) {
+        throw error;
+    }
+}
+```
+
+**장점**:
+- ✅ 데이터 손실 방지
+- ✅ 사용자 제어
+
+**단점**:
+- ⚠️ 구현 복잡도 증가
+- ⚠️ 사용자 개입 필요 (오프라인 환경에서 부적합)
+
+**결론**: 본 프로젝트에서는 **Last-Write-Wins 전략**을 사용합니다. 오프라인 환경에서 자동으로 충돌을 해결하고, 사용자 경험을 최우선으로 고려합니다.
 
 ### 중복 방지
 
 1. **로컬 ID 기준**: 로컬 메모는 고유한 `localId`로 식별
 2. **서버 ID 매핑**: 동기화 성공 시 `serverId` 설정하여 매핑
 3. **동기화 상태 관리**: `syncStatus`로 중복 동기화 방지
+4. **동기화 큐 순서 보장**: `createdAt` 기준 정렬로 작업 순서 보장
+5. **메모 수정 시 기존 큐 항목 제거**: 동일한 메모를 여러 번 수정한 경우, 최신 수정 내용만 동기화
 
 ---
 
@@ -1146,7 +2916,36 @@ export const memoService = new MemoService();
 2. **서버 에러 (4xx)**: 
    - 검증 오류: 로컬 메모에 에러 표시, 수정 유도
    - 인증 오류: 토큰 갱신 후 재시도
+   - 메모 수정 시 404 에러: 서버에 메모가 없음 (이미 삭제됨) → 로컬 메모도 삭제
+   - 메모 삭제 시 404 에러: 서버에 메모가 없음 (이미 삭제됨) → 로컬 메모도 삭제, 동기화 성공으로 처리
 3. **서버 에러 (5xx)**: 재시도 큐에 추가
+
+### 메모 수정/삭제 시 특수 케이스
+
+#### 1. 아직 동기화되지 않은 메모 수정
+- **상황**: 오프라인에서 메모를 작성한 후, 동기화 전에 수정 시도
+- **처리**: 수정 불가 (서버 ID가 없어서 수정할 수 없음)
+- **에러 메시지**: "아직 동기화되지 않은 메모는 수정할 수 없습니다. 먼저 동기화를 완료해주세요."
+
+#### 2. 아직 동기화되지 않은 메모 삭제
+- **상황**: 오프라인에서 메모를 작성한 후, 동기화 전에 삭제 시도
+- **처리**: 로컬에서 즉시 삭제, 동기화 큐의 CREATE 항목도 제거
+- **이유**: 서버에 아직 존재하지 않는 메모이므로 서버 동기화 불필요
+
+#### 3. 메모 수정 후 다시 수정
+- **상황**: 오프라인에서 메모를 수정한 후, 동기화 전에 다시 수정
+- **처리**: 기존 동기화 큐의 UPDATE 항목을 제거하고 새로운 UPDATE 항목 추가
+- **이유**: 최신 수정 내용만 동기화하여 중복 동기화 방지
+
+#### 4. 메모 수정 후 삭제
+- **상황**: 오프라인에서 메모를 수정한 후, 동기화 전에 삭제
+- **처리**: UPDATE 항목을 제거하고 DELETE 항목 추가
+- **이유**: 수정 내용은 무의미하므로 삭제만 동기화
+
+#### 5. 메모 삭제 후 다시 삭제
+- **상황**: 오프라인에서 메모를 삭제한 후, 동기화 전에 다시 삭제 시도
+- **처리**: 이미 삭제 대기 상태이므로 추가 처리 없음
+- **이유**: 중복 삭제 방지
 
 ### 사용자 피드백
 
@@ -1180,9 +2979,15 @@ function renderMemo(memo) {
    - 테이블 생성
    - CRUD 메서드 구현
 
-2. **네트워크 모니터링**
+2. **Service Worker 등록**
+   - Service Worker 파일 생성
+   - 등록 및 설치 로직 구현
+   - 브라우저 호환성 확인 및 폴백 전략
+
+3. **네트워크 모니터링**
    - `navigator.onLine` 감지
    - 이벤트 리스너 설정
+   - Service Worker와 통합
 
 ### Phase 2: 오프라인 메모 작성
 
@@ -1205,14 +3010,21 @@ function renderMemo(memo) {
    - 서버 ID 매핑
    - 상태 업데이트
 
+3. **Background Sync 구현**
+   - Service Worker에서 Background Sync 이벤트 처리
+   - 페이지 종료 후 동기화 지원
+   - 네트워크 복구 시 자동 재시도
+
 ### Phase 4: 자동화
 
 1. **네트워크 복구 감지**
    - 자동 동기화 트리거
+   - Service Worker Background Sync와 통합
 
 2. **재시도 로직**
    - Exponential Backoff
    - 실패 처리
+   - Service Worker에서 네트워크 요청 재시도 제어
 
 ### Phase 5: UI 개선
 
@@ -2094,59 +3906,36 @@ export const notificationService = new NotificationService();
 
 ---
 
-## 관련 시나리오
-
-### 멀티 디바이스 오프라인 동기화
-
-> **참고**: 본 문서는 단일 디바이스(웹 또는 앱)에서의 오프라인 메모 작성 및 동기화에 대해 다룹니다.  
-> 여러 디바이스에서 오프라인 메모를 작성한 후 네트워크 복구 시 양방향 동기화가 필요한 시나리오에 대해서는 **[멀티 디바이스 오프라인 동기화 설계](./MULTI_DEVICE_SYNC.md)** 문서를 참조하세요.
-
-#### 시나리오 요약
-
-```
-1. 노트북(웹)에서 오프라인 상태로 메모 A, B 작성
-2. 모바일(앱)에서 오프라인 상태로 메모 C, D 작성
-3. 네트워크 복구 시:
-   - 양방향 동기화 (각 디바이스 → 서버, 서버 → 각 디바이스)
-   - 노트북: 메모 A, B, C, D 모두 표시
-   - 모바일: 메모 A, B, C, D 모두 표시
-   - 메모 내용 손실 없음
-   - 정렬 방법(memoStartTime)에 따라 올바르게 표시
-```
-
-#### 주요 차이점
-
-| 구분 | 단일 디바이스 (본 문서) | 멀티 디바이스 ([참조](./MULTI_DEVICE_SYNC.md)) |
-|------|------------------------|----------------------------------------------|
-| **동기화 방향** | 단방향 (로컬 → 서버) | 양방향 (로컬 ↔ 서버) |
-| **서버 데이터 다운로드** | 선택사항 | 필수 (다른 디바이스의 메모 받아오기) |
-| **데이터 병합** | 간단 (로컬 + 서버) | 복잡 (여러 디바이스의 메모 병합) |
-| **충돌 해결** | 거의 없음 | 필요 (동일 시간에 여러 디바이스에서 작성) |
-| **중복 방지** | 단순 | 중요 (여러 디바이스 간 중복 방지) |
-
-#### 구현 포인트
-
-1. **양방향 동기화**
-   - 업로드: 로컬 메모 → 서버
-   - 다운로드: 서버 메모 → 로컬 (다른 디바이스의 메모 포함)
-
-2. **데이터 병합**
-   - 로컬 메모와 서버 메모 비교
-   - 중복 제거
-   - 새 메모 추가
-
-3. **정렬 보장**
-   - `memoStartTime` 기준 정렬
-   - 시간이 같을 때 대비
-
----
-
 ## 추가 고려사항
 
-### 1. 데이터 정리
+### 1. 데이터 정리 (하이브리드 전략 적용) ⭐
 
-- 동기화 완료된 메모는 일정 시간 후 로컬에서 삭제 가능 (선택사항)
-- 또는 모든 메모를 로컬에 보관 (오프라인 조회 지원)
+**전략**: 하이브리드 데이터 정리 전략을 사용합니다.
+
+**정리 규칙**:
+1. **최근 7일 메모**: IndexedDB에 보관 (오프라인 조회 지원)
+2. **7일 이상 된 메모**: 동기화 완료 후 즉시 삭제
+3. **30일 이상 된 동기화 완료 메모**: 주기적 정리 작업으로 삭제
+4. **동기화 대기/실패 메모**: 재시도를 위해 유지
+
+**주기적 정리 작업**:
+```javascript
+// 앱 시작 시 또는 주기적으로 실행
+async function startPeriodicCleanup() {
+    // 24시간마다 정리 작업 실행
+    setInterval(async () => {
+        await offlineMemoService.periodicCleanup();
+    }, 24 * 60 * 60 * 1000);
+    
+    // 초기 실행
+    await offlineMemoService.periodicCleanup();
+}
+```
+
+**장점**:
+- ✅ 최근 메모는 오프라인에서도 조회 가능
+- ✅ 용량 자동 관리 (오래된 메모 삭제)
+- ✅ 성능 유지 (IndexedDB 크기 제한)
 
 ### 2. 용량 관리
 
@@ -2160,7 +3949,7 @@ export const notificationService = new NotificationService();
 
 ### 4. 확장성
 
-- 메모 수정/삭제도 오프라인 지원 (추후 구현)
+- 메모 수정/삭제 오프라인 지원 구현 완료
 - 다른 기능에도 오프라인 지원 확장 가능
 
 ---
@@ -2169,11 +3958,13 @@ export const notificationService = new NotificationService();
 
 ### 관련 문서
 
-- [멀티 디바이스 오프라인 동기화 설계](./MULTI_DEVICE_SYNC.md): 여러 디바이스에서 오프라인 메모 작성 후 양방향 동기화하는 시나리오
+- [Offline-First 아키텍처 설계 및 전략](./OFFLINE_FIRST.md): Service Worker 사용 결정 및 데이터 정리 전략
 
 ### 외부 자료
 
 - [IndexedDB API](https://developer.mozilla.org/en-US/docs/Web/API/IndexedDB_API)
+- [Service Worker API](https://developer.mozilla.org/en-US/docs/Web/API/Service_Worker_API)
+- [Background Sync API](https://developer.mozilla.org/en-US/docs/Web/API/Background_Sync_API)
 - [Offline-First Architecture](https://offlinefirst.org/)
 - [Progressive Web Apps](https://web.dev/progressive-web-apps/)
 - [Network Information API](https://developer.mozilla.org/en-US/docs/Web/API/Network_Information_API)
@@ -2182,9 +3973,11 @@ export const notificationService = new NotificationService();
 
 ## 다음 단계
 
-1. IndexedDB 스키마 구현
-2. 오프라인 메모 작성 기능 구현
-3. 동기화 큐 구현
-4. 네트워크 복구 감지 및 자동 동기화
-5. UI 통합 및 테스트
+1. Service Worker 등록 및 설치
+2. IndexedDB 스키마 구현
+3. 오프라인 메모 작성 기능 구현
+4. 동기화 큐 구현
+5. Background Sync 구현 (페이지 종료 후 동기화)
+6. 네트워크 복구 감지 및 자동 동기화
+7. UI 통합 및 테스트
 
