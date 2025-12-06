@@ -1,12 +1,12 @@
 package com.readingtracker.server.service;
 
 import com.readingtracker.server.config.JwtConfig;
-import com.readingtracker.dbms.entity.RefreshToken;
 import com.readingtracker.dbms.entity.User;
 import com.readingtracker.dbms.entity.UserDevice;
-import com.readingtracker.dbms.repository.RefreshTokenRepository;
 import com.readingtracker.dbms.repository.UserDeviceRepository;
+import com.readingtracker.dbms.repository.UserRepository;
 import com.readingtracker.server.common.util.JwtUtil;
+import com.readingtracker.server.service.RefreshTokenRedisService.RefreshTokenData;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.scheduling.annotation.Async;
@@ -22,10 +22,13 @@ public class JwtService {
     private JwtUtil jwtUtil;
     
     @Autowired
-    private RefreshTokenRepository refreshTokenRepository;
+    private RefreshTokenRedisService refreshTokenRedisService;
     
     @Autowired
     private UserDeviceRepository userDeviceRepository;
+    
+    @Autowired
+    private UserRepository userRepository;
     
     @Autowired
     private JwtConfig jwtConfig;
@@ -111,7 +114,7 @@ public class JwtService {
      * @param deviceId 디바이스 ID
      */
     public void revokeRefreshTokens(Long userId, String deviceId) {
-        refreshTokenRepository.revokeAllTokensByUserAndDevice(userId, deviceId);
+        refreshTokenRedisService.revokeAllTokensByUserAndDevice(userId, deviceId);
     }
     
     /**
@@ -119,7 +122,7 @@ public class JwtService {
      * @param userId 사용자 ID
      */
     public void revokeAllRefreshTokens(Long userId) {
-        refreshTokenRepository.deleteAllTokensByUser(userId);
+        refreshTokenRedisService.deleteAllTokensByUser(userId);
     }
     
     /**
@@ -173,8 +176,8 @@ public class JwtService {
     private void saveRefreshToken(User user, String deviceId, String refreshToken) {
         LocalDateTime expiresAt = LocalDateTime.now().plusSeconds(jwtConfig.getRefreshTokenExpiration() / 1000);
         
-        RefreshToken token = new RefreshToken(user, deviceId, refreshToken, expiresAt);
-        refreshTokenRepository.save(token);
+        // Redis에 저장
+        refreshTokenRedisService.saveRefreshToken(user.getId(), deviceId, refreshToken, expiresAt);
     }
     
     /**
@@ -211,31 +214,33 @@ public class JwtService {
             throw new IllegalArgumentException("토큰 정보가 올바르지 않습니다.");
         }
         
-        // 3. DB에서 Refresh Token 조회
-        RefreshToken tokenEntity = refreshTokenRepository.findByToken(oldRefreshToken)
-            .orElseThrow(() -> new IllegalArgumentException("유효하지 않은 Refresh Token입니다."));
+        // 3. Redis에서 Refresh Token 조회
+        RefreshTokenData tokenData = refreshTokenRedisService.getRefreshToken(oldRefreshToken);
+        if (tokenData == null) {
+            throw new IllegalArgumentException("유효하지 않은 Refresh Token입니다.");
+        }
         
         // 4. 탈취 감지: 이미 사용된 토큰(revoked=true)이 다시 사용되는 경우
-        if (tokenEntity.getRevoked()) {
+        if (Boolean.TRUE.equals(tokenData.getRevoked())) {
             // 보안 위협! 해당 사용자의 모든 Refresh Token 폐기
-            refreshTokenRepository.revokeAllTokensByUserAndDevice(userId, deviceId);
+            refreshTokenRedisService.revokeAllTokensByUserAndDevice(userId, deviceId);
             throw new IllegalArgumentException("토큰 탈취가 감지되었습니다. 모든 세션이 종료되었습니다. 다시 로그인해주세요.");
         }
         
         // 5. 만료 확인
-        if (tokenEntity.getExpiresAt().isBefore(LocalDateTime.now())) {
+        if (tokenData.getExpiresAt().isBefore(LocalDateTime.now())) {
             throw new IllegalArgumentException("만료된 Refresh Token입니다.");
         }
         
         // 6. 사용자 조회
-        User user = tokenEntity.getUser();
+        User user = userRepository.findById(userId)
+            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
         if (!"ACTIVE".equals(user.getStatus().name())) {
             throw new IllegalArgumentException("비활성화된 계정입니다.");
         }
         
         // 7. 기존 Refresh Token 폐기 (revoked=true)
-        tokenEntity.setRevoked(true);
-        refreshTokenRepository.save(tokenEntity);
+        refreshTokenRedisService.revokeRefreshToken(oldRefreshToken);
         
         // 8. 새 Access Token 생성
         String newAccessToken = jwtUtil.generateAccessToken(user);

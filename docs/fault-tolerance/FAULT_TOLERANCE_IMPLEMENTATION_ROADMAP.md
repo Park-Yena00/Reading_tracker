@@ -88,10 +88,17 @@ Phase 2: 인프라 개선 (3-4주)
    - 네트워크 복구 감지 및 자동 동기화
    - UI 통합 및 동기화 상태 표시
 
-**완료 기준**:
-- [ ] 오프라인 상태에서 메모 작성 가능
-- [ ] 네트워크 복구 시 자동 동기화 작동
-- [ ] 웹 UI에서 동기화 상태 표시
+**완료 기준**: ✅ **모두 완료**
+- [x] 오프라인 상태에서 메모 작성 가능
+- [x] 오프라인 상태에서 메모 수정 가능 (시나리오 1: 동기화 중 수정 허용)
+- [x] 오프라인 상태에서 메모 삭제 가능 (시나리오 2, 5: WAITING 상태 처리)
+- [x] 네트워크 복구 시 자동 동기화 작동
+- [x] 2-Phase Health Check (로컬 서버 + 외부 서비스)
+- [x] 웹 UI에서 동기화 상태 표시 (메모 카드에 아이콘 표시)
+- [x] Toast 메시지로 동기화 결과 피드백
+- [x] Service Worker 백그라운드 동기화
+- [x] 멱등성 보장 (서버 측 Redis)
+- [x] 데이터 무결성 보장 (시나리오 1, 2, 5, 6 개선 사항 반영)
 
 #### Phase 2: 인프라 개선
 
@@ -135,52 +142,98 @@ Phase 2: 인프라 개선 (3-4주)
 
 ### 개요
 
-네트워크가 없는 환경에서 메모를 작성하고, 네트워크 복구 시 자동으로 서버에 동기화하는 기능입니다.
+네트워크가 없는 환경에서 메모를 작성하고, 네트워크 복구 시 자동으로 서버에 동기화하는 기능입니다. **✅ 구현 완료**
 
 ### 아키텍처
 
 ```
-[사용자 메모 작성]
+[사용자 메모 작성/수정/삭제]
         ↓
 [로컬 저장소에 저장] ← IndexedDB (웹)
         ↓
-[UI 즉시 업데이트]
+[UI 즉시 업데이트] (Optimistic UI)
         ↓
-[네트워크 상태 확인]
-        ├─ 온라인 → [동기화 큐에 추가] → [서버로 전송]
+[동기화 큐에 추가] (CREATE/UPDATE/DELETE)
+        ↓
+[네트워크 상태 확인] (2-Phase Health Check)
+        ├─ 온라인 + 서버 연결 가능 → [Service Worker 동기화]
+        │                                   ↓
+        │                           [서버로 전송]
+        │                                   ↓
+        │                           [서버 응답 처리]
+        │                                   ├─ 성공 → [로컬 메모 업데이트 (서버 ID)]
+        │                                   │         [Toast 메시지 표시]
+        │                                   └─ 실패 → [재시도 큐에 추가]
+        │                                             [Exponential Backoff]
         └─ 오프라인 → [대기 상태 표시]
                             ↓
                     [네트워크 재연결 감지]
                             ↓
+                    [2-Phase Health Check]
+                            ├─ 로컬 서버 연결 확인
+                            └─ 외부 서비스(Aladin API) 연결 확인
+                            ↓
                     [대기 중인 메모 동기화]
                             ↓
-                    [서버 응답 처리]
-                            ├─ 성공 → [로컬 메모 업데이트 (서버 ID)]
-                            └─ 실패 → [재시도 큐에 추가]
+                    [WAITING 상태 처리] (시나리오 2, 5)
+                            ↓
+                    [순차 동기화] (작성 시간 순서)
 ```
 
 ### 구현 방법
 
-#### 웹 (JavaScript)
+#### 웹 (JavaScript) ✅ 구현 완료
 
 **기술 스택**:
-- IndexedDB: 로컬 저장소
-- Service Worker: 네트워크 모니터링 (선택사항)
-- `navigator.onLine` API: 네트워크 상태 감지
-- 서버 헬스체크: 실제 서버 연결 가능 여부 확인
+- **IndexedDB**: 로컬 저장소 (`offline_memos`, `sync_queue` 테이블)
+- **Service Worker**: 네트워크 요청 가로채기 및 백그라운드 동기화
+- **`navigator.onLine` API**: 네트워크 어댑터 상태 감지
+- **2-Phase Health Check**: 로컬 서버 + 외부 서비스(Aladin API) 연결 확인
+- **Toast 메시지**: 동기화 상태 UI 피드백
 
 **주요 컴포넌트**:
-1. `IndexedDBManager`: 로컬 저장소 관리
-2. `OfflineMemoService`: 오프라인 메모 작성 및 관리
-3. `SyncQueueManager`: 동기화 큐 관리
-4. `NetworkMonitor`: 네트워크 상태 모니터링 (헬스체크 포함)
+1. **`IndexedDBManager`** (`js/storage/indexeddb-manager.js`): 로컬 저장소 관리
+   - `offline_memos`: 오프라인 메모 저장
+   - `sync_queue`: 동기화 큐 관리
+   - 인덱스: `syncStatus`, `userBookId`, `memoStartTime`, `serverId`, `status`, `localMemoId`
 
-#### 네트워크 연결 감지 및 자동 동기화 메커니즘
+2. **`OfflineMemoService`** (`js/services/offline-memo-service.js`): 오프라인 메모 작성 및 관리
+   - `createMemo()`: 메모 생성 (Optimistic UI)
+   - `updateMemo()`: 메모 수정 (시나리오 1: 동기화 중 수정 허용)
+   - `deleteMemo()`: 메모 삭제 (시나리오 2, 5: WAITING 상태 처리)
+   - `syncPendingMemos()`: 대기 중인 메모 동기화 (WAITING 상태 처리 포함)
+   - `syncQueueItem()`: 개별 큐 항목 동기화
+
+3. **`SyncQueueManager`** (`js/services/sync-queue-manager.js`): 동기화 큐 관리
+   - `enqueue()`: 큐 항목 추가 (WAITING 상태 지원, `originalQueueId` 지원)
+   - `getWaitingItems()`: WAITING 상태 항목 조회
+   - `getQueueItem()`: 특정 큐 항목 조회
+   - `updateQueueItem()`: 큐 항목 업데이트
+   - 상태: `PENDING`, `WAITING`, `SYNCING`, `SUCCESS`, `FAILED`
+
+4. **`NetworkMonitor`** (`js/utils/network-monitor.js`): 네트워크 상태 모니터링
+   - `checkServerHealth()`: 로컬 서버 헬스체크
+   - `checkExternalServiceHealth()`: 외부 서비스(Aladin API) 헬스체크
+   - `notifyNetworkStatus()`: 네트워크 상태 이벤트 디스패치
+   - `handleSyncSuccess()`: 동기화 완료 후 Toast 메시지 표시
+
+5. **`MemoService`** (`js/services/memo-service.js`): 메모 서비스 통합
+   - `mergeMemos()`: 로컬 메모와 서버 메모 통합 (시나리오 6: 중복 방지)
+   - 동기화 대기 중인 메모 우선 표시
+
+6. **`service-worker.js`**: Service Worker 백그라운드 동기화
+   - 네트워크 요청 가로채기
+   - 실패한 요청을 동기화 큐에 저장
+   - 백그라운드 동기화 실행
+   - WAITING 상태 처리 로직
+
+#### 네트워크 연결 감지 및 자동 동기화 메커니즘 ✅ 구현 완료
 
 **핵심 원리**:
 - `navigator.onLine` API로 네트워크 어댑터 상태 확인
 - `online` / `offline` 이벤트로 네트워크 상태 변경 감지
-- **서버 헬스체크**: 실제 서버 연결 가능 여부 확인 (권장)
+- **2-Phase Health Check**: 로컬 서버 + 외부 서비스(Aladin API) 연결 확인
+- **Toast 메시지**: 동기화 상태 UI 피드백
 
 **구현 방식**:
 
@@ -191,12 +244,16 @@ class NetworkMonitor {
         // 1초 대기 (네트워크 안정화)
         await this.delay(1000);
         
-        // 2. 실제 서버 연결 가능 여부 확인 (헬스체크)
-        const isServerReachable = await this.checkServerHealth();
+        // 2-Phase Health Check
+        const isLocalServerReachable = await this.checkServerHealth();
+        const isExternalServiceReachable = await this.checkExternalServiceHealth();
         
-        if (isServerReachable) {
-            // 서버에 실제로 연결 가능 → 동기화 시작
-            await offlineMemoService.syncPendingMemos();
+        if (isLocalServerReachable) {
+            // 로컬 서버 연결 가능 → 동기화 시작
+            const result = await offlineMemoService.syncPendingMemos();
+            
+            // 동기화 완료 후 Toast 메시지 표시
+            this.handleSyncSuccess(result, isExternalServiceReachable);
         } else {
             // 네트워크는 연결되었지만 서버 접근 불가
             console.warn('네트워크는 연결되었지만 서버에 접근할 수 없습니다.');
@@ -206,19 +263,49 @@ class NetworkMonitor {
     }
     
     /**
-     * 서버 헬스체크 (실제 연결 가능 여부 확인)
+     * 로컬 서버 헬스체크 (Phase 1)
      */
     async checkServerHealth() {
         try {
-            // 간단한 HEAD 요청으로 서버 응답 확인
-            const response = await fetch('http://localhost:8080/api/v1/health', {
+            const response = await fetch('/api/v1/health', {
                 method: 'HEAD',
                 signal: AbortSignal.timeout(3000)  // 3초 타임아웃
             });
             return response.ok;
         } catch (error) {
-            console.error('서버 헬스체크 실패:', error);
+            console.error('로컬 서버 헬스체크 실패:', error);
             return false;
+        }
+    }
+    
+    /**
+     * 외부 서비스 헬스체크 (Phase 2: Aladin API)
+     */
+    async checkExternalServiceHealth() {
+        try {
+            const response = await fetch('/api/v1/health/aladin', {
+                method: 'GET',
+                signal: AbortSignal.timeout(3000)
+            });
+            return response.ok;
+        } catch (error) {
+            console.warn('외부 서비스(Aladin API) 연결 불가:', error);
+            return false;
+        }
+    }
+    
+    /**
+     * 동기화 완료 후 Toast 메시지 표시
+     */
+    handleSyncSuccess(result, isExternalServiceReachable) {
+        if (result.successCount > 0) {
+            showToast(`✅ ${result.successCount}개의 메모 동기화 완료.`, 'success');
+        }
+        if (result.failedCount > 0) {
+            showToast(`⚠️ ${result.failedCount}개의 메모 동기화 실패.`, 'warning');
+        }
+        if (!isExternalServiceReachable) {
+            showToast('⚠️ 외부 서비스 연결 불가. 검색 제한됨.', 'warning');
         }
     }
 }
@@ -226,22 +313,62 @@ class NetworkMonitor {
 
 **이점**:
 - `navigator.onLine`만으로는 Wi-Fi 연결되어 있지만 인터넷 접속 불가 상황을 감지하지 못함
-- 헬스체크를 통해 실제 서버 연결 가능 여부를 확인하여 불필요한 동기화 시도 방지
+- 2-Phase Health Check로 로컬 서버와 외부 서비스 연결 상태를 각각 확인
+- 외부 서비스(Aladin API) 연결 불가 시에도 로컬 서버 기능은 정상 사용 가능
+- Toast 메시지로 사용자에게 명확한 피드백 제공
 - 서버 접근 불가 시 자동 재시도로 안정성 향상
 
 **상세 구현**: [OFFLINE_MEMO_SYNC.md](./OFFLINE_MEMO_SYNC.md) 참조
 
-### 동기화 전략
+### 동기화 전략 ✅ 구현 완료
 
-1. **낙관적 업데이트**: 메모 작성 즉시 로컬 저장 및 UI 업데이트
+1. **낙관적 업데이트 (Optimistic UI)**: 메모 작성/수정/삭제 즉시 로컬 저장 및 UI 업데이트
+   - 시나리오 1: 동기화 중인 메모도 수정 가능 (`syncing_create` 상태 허용)
+   - 시나리오 2, 5: DELETE 시도 즉시 UI에서 숨김 (Optimistic Deletion)
+   - 시나리오 6: 동기화 대기 중인 메모 우선 표시
+
 2. **자동 재시도**: Exponential Backoff 전략 (5초, 10초, 20초)
-3. **순차 동기화**: `memoStartTime` 기준 정렬 후 순차 동기화
+   - 최대 3회 재시도
+   - 실패 시 `failed` 상태로 표시
+
+3. **순차 동기화**: `memoStartTime` 또는 `createdAt` 기준 정렬 후 순차 동기화
+   - 시나리오 2, 5: WAITING 상태 항목은 원본 항목 완료 후 실행
+
 4. **부분 실패 처리**: 일부 메모만 실패해도 나머지는 계속 진행
+   - 성공/실패 개수 반환하여 Toast 메시지 표시
 
-### 백엔드 변경사항
+5. **상태 관리 강화**:
+   - `syncStatus`: `pending`, `syncing_create`, `syncing_update`, `syncing_delete`, `waiting`, `synced`, `failed`
+   - 큐 항목 상태: `PENDING`, `WAITING`, `SYNCING`, `SUCCESS`, `FAILED`
 
-**변경 불필요**: 기존 API 그대로 사용
-- `POST /api/v1/memos`: 메모 작성
+6. **WAITING 상태 처리** (시나리오 2, 5):
+   - UPDATE 동기화 중 DELETE 시도 시 `WAITING` 상태로 설정
+   - 원본 항목(`originalQueueId`)이 `SUCCESS` 상태가 되면 `PENDING`으로 변경하여 실행
+   - Service Worker와 클라이언트 양쪽에서 처리
+
+### 백엔드 변경사항 ✅ 구현 완료
+
+**멱등성 보장**:
+- **POST /api/v1/memos**: `Idempotency-Key` 헤더 지원 (Redis 기반)
+  - 동일한 키로 재요청 시 캐시된 응답 반환
+  - 네트워크 재차단 시 중복 생성 방지
+- **DELETE /api/v1/memos/{memoId}**: 이미 삭제된 메모에 대해서도 성공 응답 반환
+  - `findById().orElse(null)` 사용하여 멱등성 보장
+
+**헬스체크 엔드포인트**:
+- `GET /api/v1/health`: 로컬 서버 상태 확인
+- `GET /api/v1/health/aladin`: 외부 서비스(Aladin API) 연결 확인
+
+**Redis 통합**:
+- 멱등성 키 관리 (`IdempotencyKeyService`)
+- Refresh Token 저장 (기존 MySQL에서 마이그레이션)
+- 태그 데이터 캐싱 (Purger-Driven Invalidation, 7일 TTL)
+- 내 서재 정보 캐싱 (Write-Through 패턴, 5-10분 TTL)
+
+**기존 API 유지**:
+- `POST /api/v1/memos`: 메모 작성 (멱등성 보장 추가)
+- `PUT /api/v1/memos/{memoId}`: 메모 수정
+- `DELETE /api/v1/memos/{memoId}`: 메모 삭제 (멱등성 보장 추가)
 - `GET /api/v1/memos/books/{userBookId}`: 메모 조회
 
 ---
@@ -290,144 +417,377 @@ class NetworkMonitor {
     │   │       │
     │   └───┬───┘
     │       │
-    │   [2PC Pattern]
+    │   [Custom Dual Write]
     │       │
-    │   ├─ 성공 → Commit
-    │   └─ 실패 → Rollback (양쪽 모두)
+    │   ├─ Primary 성공 → Secondary 시도
+    │   │   ├─ Secondary 성공 → Commit
+    │   │   └─ Secondary 실패 → Primary 보상 트랜잭션 (DELETE)
+    │   │
+    │   └─ Primary 실패 → Exception (Failover 불가)
     │
-[Failover]
+[Read Failover]
     │
     ├─ Primary 성공 → 반환
     └─ Primary 실패 → Secondary 시도
 ```
 
+### 핵심 전략: Custom Dual Write 및 Read Failover
+
+#### 전략 개요
+
+MySQL Replication을 사용할 수 없으므로, 모든 쓰기 작업은 애플리케이션에서 두 개의 독립적인 트랜잭션으로 처리되어야 하며, 데이터 **일관성(Consistency)**을 보장하기 위해 Primary 실패 시 Secondary로의 쓰기 Failover는 허용되지 않습니다.
+
+**핵심 원칙**:
+1. **쓰기 작업**: Primary에 먼저 쓰기 → 성공 시 Secondary에 쓰기 → Secondary 실패 시 Primary에 보상 트랜잭션
+2. **읽기 작업**: Primary에서 읽기 시도 → 실패 시 Secondary로 Failover
+3. **일관성 보장**: Primary 실패 시 Secondary로의 쓰기 Failover는 허용하지 않음 (데이터 일관성 유지)
+4. **복잡성 최소화**: 2PC의 Pre-Commit 단계를 생략하고, 즉시 **보상(Compensation)**을 선택하여 구현 복잡성을 낮춤
+
+**설계 원칙: 비기능 요구사항 관련 코드의 단일 책임 원칙**
+
+비기능 요구사항(Fault Tolerance, 장애 허용 등)과 관련된 코드는 일반적인 CRUD 비즈니스 로직과는 성격이 다릅니다. 이들은 시스템의 안정성, 일관성, 회복탄력성이라는 **단일 목표를 달성하기 위해 여러 세부 단계를 오케스트레이션(Orchestration)** 해야 합니다.
+
+**원칙**: 비기능 품질 관련 코드는 시스템의 회복탄력성이라는 단일 목표를 달성하기 위한 **응집된 로직**으로 간주하며, 여러 단계를 하나의 책임으로 묶는 것이 적절합니다.
+
+**이유**:
+1. **높은 응집도 (High Cohesion)**: 복구 실패 처리(`handleRecoveryFailure()`)는 복구 실패 시 일어나는 모든 작업(재시도 관리, 로깅, 알림, 재큐잉)을 묶어두는 것이 논리적으로 가장 응집도가 높습니다. 이 단계들을 분리하면, 실패 처리라는 하나의 시나리오를 이해하기 위해 여러 함수를 넘나들어야 하는 문제가 발생합니다.
+2. **가독성 및 흐름 유지**: 오케스트레이션 로직의 핵심은 **"흐름"**입니다. `processRecoveryEvent()` 안에 로깅을 포함함으로써, 이벤트 처리의 성공/실패 여부가 한눈에 보입니다.
+3. **변경의 용이성 (Maintainability)**: 실패 처리 정책이 바뀐다면 `handleRecoveryFailure()`만 수정하면 되고, 로깅 방식이 바뀐다면 `processRecoveryEvent()` 내의 로깅 로직만 수정하면 됩니다. 책임이 명확하게 정의되어 있기 때문에, 각 책임 범위 내에서의 변경은 다른 함수에 영향을 미치지 않습니다.
+
+**결론**: 비기능 요구사항 관련 코드에서는 **"여러 단계를 하나의 책임으로 묶는 것이 적절하다"**는 원칙을 유지 및 준수해야 합니다. (자세한 내용은 [아키텍처 문서](../architecture/ARCHITECTURE.md)의 "함수 단일 책임 원칙 - 비기능 요구사항 관련 예외 사항" 참조)
+
+#### 1. 쓰기(Write) 로직: Custom Dual Write
+
+**흐름**:
+```
+Primary에 쓰기 시도
+    ↓
+성공
+    ↓
+Secondary에 쓰기 시도
+    ├─ 성공 → Commit (양쪽 모두 성공)
+    └─ 실패 → Primary에 보상 트랜잭션 실행 (DELETE)
+              → Exception 발생 (사용자에게 실패 알림)
+```
+
+**특징**:
+- Primary 실패 시: 즉시 Exception 발생 (Secondary로 Failover 불가)
+- Secondary 실패 시: Primary에 대해 수동 보상 트랜잭션(Compensation) 실행
+- 2PC의 복잡성을 피하고, 보상 트랜잭션으로 일관성 보장
+
+#### 2. 읽기(Read) 로직: Primary Failover
+
+**흐름**:
+```
+Primary에서 읽기 시도
+    ├─ 성공 → 반환
+    └─ 실패 → Secondary에서 읽기 시도
+              ├─ 성공 → 반환
+              └─ 실패 → Exception 발생
+```
+
+**특징**:
+- Primary 실패 시 Secondary로 자동 Failover
+- 사용자에게는 투명하게 처리
+- 두 DB 모두 실패 시에만 Exception 발생
+
 ### 구현 방법
 
-#### 옵션 1: MySQL Replication + 커스텀 트랜잭션 관리 (권장)
+#### 데이터 소스 및 트랜잭션 관리자 설정
+
+Primary와 Secondary 각각에 대해 독립적인 `DataSource`와 `PlatformTransactionManager`를 정의합니다. (이전 라우팅 설정 대신 사용)
+
+**패키지 위치**: `com.readingtracker.server.config` (아키텍처 요구사항 준수)
+
+**설정 예시**:
+
+```yaml
+# application.yml
+spring:
+  datasource:
+    primary:
+      url: jdbc:mysql://primary-db:3306/reading_tracker
+      username: root
+      password: ${PRIMARY_DB_PASSWORD}
+      driver-class-name: com.mysql.cj.jdbc.Driver
+      hikari:
+        maximum-pool-size: 10
+        minimum-idle: 5
+    secondary:
+      url: jdbc:mysql://secondary-db:3306/reading_tracker
+      username: root
+      password: ${SECONDARY_DB_PASSWORD}
+      driver-class-name: com.mysql.cj.jdbc.Driver
+      hikari:
+        maximum-pool-size: 10
+        minimum-idle: 5
+```
+
+```java
+package com.readingtracker.server.config;
+
+@Configuration
+public class DualMasterDataSourceConfig {
+    
+    @Bean
+    @Primary
+    @ConfigurationProperties("spring.datasource.primary")
+    public DataSource primaryDataSource() {
+        return DataSourceBuilder.create().build();
+    }
+    
+    @Bean
+    @ConfigurationProperties("spring.datasource.secondary")
+    public DataSource secondaryDataSource() {
+        return DataSourceBuilder.create().build();
+    }
+    
+    @Bean
+    @Primary
+    public PlatformTransactionManager primaryTransactionManager(
+            @Qualifier("primaryDataSource") DataSource primaryDataSource) {
+        return new DataSourceTransactionManager(primaryDataSource);
+    }
+    
+    @Bean
+    public PlatformTransactionManager secondaryTransactionManager(
+            @Qualifier("secondaryDataSource") DataSource secondaryDataSource) {
+        return new DataSourceTransactionManager(secondaryDataSource);
+    }
+    
+    @Bean
+    @Primary
+    public JdbcTemplate primaryJdbcTemplate(
+            @Qualifier("primaryDataSource") DataSource primaryDataSource) {
+        return new JdbcTemplate(primaryDataSource);
+    }
+    
+    @Bean
+    public JdbcTemplate secondaryJdbcTemplate(
+            @Qualifier("secondaryDataSource") DataSource secondaryDataSource) {
+        return new JdbcTemplate(secondaryDataSource);
+    }
+}
+```
+
+#### 읽기(Read) 서비스 로직: Failover 구현
+
+읽기 Failover는 Primary DB에 대해 트랜잭션을 시도하고, 실패 시 Secondary DB의 별도 트랜잭션으로 재시도합니다.
+
+**구현 예시**:
+
+```java
+@Service
+public class DualMasterReadService {
+    
+    @Autowired
+    @Qualifier("primaryTransactionManager")
+    private PlatformTransactionManager primaryTxManager;
+    
+    @Autowired
+    @Qualifier("secondaryTransactionManager")
+    private PlatformTransactionManager secondaryTxManager;
+    
+    @Autowired
+    @Qualifier("primaryJdbcTemplate")
+    private JdbcTemplate primaryJdbcTemplate;
+    
+    @Autowired
+    @Qualifier("secondaryJdbcTemplate")
+    private JdbcTemplate secondaryJdbcTemplate;
+    
+    /**
+     * Primary에서 읽기 시도, 실패 시 Secondary로 Failover
+     */
+    public <T> T readWithFailover(Function<JdbcTemplate, T> readOperation) {
+        // Primary에서 시도
+        try {
+            TransactionTemplate txTemplate = new TransactionTemplate(primaryTxManager);
+            return txTemplate.execute(status -> readOperation.apply(primaryJdbcTemplate));
+        } catch (Exception e) {
+            log.warn("Primary DB 읽기 실패, Secondary DB로 전환", e);
+            
+            // Secondary에서 시도
+            try {
+                TransactionTemplate txTemplate = new TransactionTemplate(secondaryTxManager);
+                return txTemplate.execute(status -> readOperation.apply(secondaryJdbcTemplate));
+            } catch (Exception e2) {
+                log.error("Secondary DB 읽기도 실패", e2);
+                throw new DatabaseUnavailableException("모든 DB 접근 실패", e2);
+            }
+        }
+    }
+}
+```
+
+**Service 메서드 적용 예시**:
+
+```java
+@Service
+public class MemoService {
+    
+    @Autowired
+    private DualMasterReadService readService;
+    
+    @Autowired
+    private MemoRepository memoRepository;
+    
+    public List<Memo> getAllBookMemos(User user, Long userBookId) {
+        return readService.readWithFailover(jdbcTemplate -> {
+            // Primary 또는 Secondary에서 읽기
+            return memoRepository.findByUserBookId(userBookId);
+        });
+    }
+}
+```
+
+#### 쓰기(Write) 서비스 로직: Custom Dual Write 및 보상 트랜잭션
+
+2PC의 복잡성을 피하고, Primary Commit 후 Secondary 실패 시 Primary를 DELETE하는 보상 트랜잭션을 구현합니다.
+
+**구현 예시**:
+
+```java
+@Service
+public class DualMasterWriteService {
+    
+    @Autowired
+    @Qualifier("primaryTransactionManager")
+    private PlatformTransactionManager primaryTxManager;
+    
+    @Autowired
+    @Qualifier("secondaryTransactionManager")
+    private PlatformTransactionManager secondaryTxManager;
+    
+    @Autowired
+    @Qualifier("primaryJdbcTemplate")
+    private JdbcTemplate primaryJdbcTemplate;
+    
+    @Autowired
+    @Qualifier("secondaryJdbcTemplate")
+    private JdbcTemplate secondaryJdbcTemplate;
+    
+    /**
+     * Custom Dual Write: Primary → Secondary 순차 쓰기
+     * Secondary 실패 시 Primary에 보상 트랜잭션 실행
+     */
+    public <T> T writeWithDualWrite(Function<JdbcTemplate, T> writeOperation,
+                                     Function<T, Void> compensationOperation) {
+        T primaryResult = null;
+        
+        // Phase 1: Primary에 쓰기
+        try {
+            TransactionTemplate primaryTx = new TransactionTemplate(primaryTxManager);
+            primaryResult = primaryTx.execute(status -> writeOperation.apply(primaryJdbcTemplate));
+        } catch (Exception e) {
+            // Primary 실패 시 즉시 Exception (Secondary로 Failover 불가)
+            log.error("Primary DB 쓰기 실패", e);
+            throw new DatabaseWriteException("Primary DB 쓰기 실패", e);
+        }
+        
+        // Phase 2: Secondary에 쓰기
+        try {
+            TransactionTemplate secondaryTx = new TransactionTemplate(secondaryTxManager);
+            secondaryTx.execute(status -> writeOperation.apply(secondaryJdbcTemplate));
+            
+            // 양쪽 모두 성공
+            return primaryResult;
+            
+        } catch (Exception e) {
+            // Secondary 실패 시 Primary에 보상 트랜잭션 실행
+            log.error("Secondary DB 쓰기 실패, Primary에 보상 트랜잭션 실행", e);
+            
+            try {
+                TransactionTemplate compensationTx = new TransactionTemplate(primaryTxManager);
+                compensationTx.execute(status -> {
+                    compensationOperation.apply(primaryResult);
+                    return null;
+                });
+            } catch (Exception compensationError) {
+                log.error("보상 트랜잭션 실행 실패", compensationError);
+                // 보상 트랜잭션 실패는 로깅만 하고, 원래 Exception을 던짐
+            }
+            
+            // Secondary 실패 Exception 발생
+            throw new DatabaseWriteException("Secondary DB 쓰기 실패, Primary 보상 트랜잭션 실행됨", e);
+        }
+    }
+}
+```
+
+**Service 메서드 적용 예시**:
+
+```java
+@Service
+public class MemoService {
+    
+    @Autowired
+    private DualMasterWriteService writeService;
+    
+    @Autowired
+    private MemoRepository memoRepository;
+    
+    public Memo createMemo(User user, Memo memo) {
+        return writeService.writeWithDualWrite(
+            // 쓰기 작업
+            jdbcTemplate -> {
+                return memoRepository.save(memo);
+            },
+            // 보상 트랜잭션 (Secondary 실패 시 Primary에서 DELETE)
+            savedMemo -> {
+                memoRepository.deleteById(savedMemo.getId());
+                return null;
+            }
+        );
+    }
+    
+    public Memo updateMemo(User user, Long memoId, MemoUpdateRequest request) {
+        return writeService.writeWithDualWrite(
+            // 쓰기 작업
+            jdbcTemplate -> {
+                Memo memo = memoRepository.findById(memoId)
+                    .orElseThrow(() -> new MemoNotFoundException(memoId));
+                memo.update(request);
+                return memoRepository.save(memo);
+            },
+            // 보상 트랜잭션 (Secondary 실패 시 Primary에서 원래 상태로 복구)
+            updatedMemo -> {
+                // 원래 상태로 복구하는 로직
+                // (예: 이전 버전을 저장해두었다가 복구)
+                return null;
+            }
+        );
+    }
+    
+    public void deleteMemo(User user, Long memoId) {
+        writeService.writeWithDualWrite(
+            // 쓰기 작업
+            jdbcTemplate -> {
+                memoRepository.deleteById(memoId);
+                return null;
+            },
+            // 보상 트랜잭션 (Secondary 실패 시 Primary에서 복구)
+            // DELETE의 보상은 복구가 어려우므로, 로깅만 수행
+            result -> {
+                log.warn("DELETE 보상 트랜잭션: Primary에서 삭제된 메모 복구 불가 (memoId: {})", memoId);
+                return null;
+            }
+        );
+    }
+}
+```
+
+#### 옵션 1: Custom Dual Write (권장) ✅
 
 **장점**:
-- MySQL의 네이티브 복제 기능 활용
-- 데이터 동기화 자동화
-- 커스텀 트랜잭션 관리로 롤백 제어 가능
+- 구현 복잡도 낮음 (2PC 대비)
+- 데이터 일관성 보장 (보상 트랜잭션)
+- Primary 실패 시 즉시 Exception으로 일관성 유지
+- 독립적인 트랜잭션으로 각 DB의 독립성 보장
 
-**구현 단계**:
+**구현 단계**: 위의 "데이터 소스 및 트랜잭션 관리자 설정", "읽기 서비스 로직", "쓰기 서비스 로직" 참조
 
-1. **MySQL Master-Master 구성**
-   ```sql
-   -- Primary DB 설정
-   server-id = 1
-   log-bin = mysql-bin
-   binlog-format = ROW
-   
-   -- Secondary DB 설정
-   server-id = 2
-   log-bin = mysql-bin
-   binlog-format = ROW
-   
-   -- 양방향 복제 설정
-   CHANGE MASTER TO ...
-   START SLAVE;
-   ```
-
-2. **Connection Pool 다중화**
-   ```yaml
-   # application.yml
-   spring:
-     datasource:
-       primary:
-         url: jdbc:mysql://primary-db:3306/reading_tracker
-         username: root
-         password: ${PRIMARY_DB_PASSWORD}
-       secondary:
-         url: jdbc:mysql://secondary-db:3306/reading_tracker
-         username: root
-         password: ${SECONDARY_DB_PASSWORD}
-   ```
-
-3. **커스텀 트랜잭션 매니저**
-   ```java
-   @Configuration
-   public class DualMasterTransactionConfig {
-       
-       @Bean
-       @Primary
-       public DataSource primaryDataSource() {
-           // Primary DB 설정
-       }
-       
-       @Bean
-       public DataSource secondaryDataSource() {
-           // Secondary DB 설정
-       }
-       
-       @Bean
-       public DualMasterTransactionManager transactionManager() {
-           return new DualMasterTransactionManager(
-               primaryDataSource(), 
-               secondaryDataSource()
-           );
-       }
-   }
-   ```
-
-4. **분산 트랜잭션 관리**
-   ```java
-   @Service
-   public class DualMasterMemoService {
-       
-       @Autowired
-       private PrimaryDataSource primaryDS;
-       
-       @Autowired
-       private SecondaryDataSource secondaryDS;
-       
-       public Memo createMemo(User user, Memo memo) {
-           Memo savedMemo = null;
-           
-           try {
-               // Phase 1: Primary DB에 실행
-               savedMemo = primaryDS.save(memo);
-               
-               // Phase 2: Secondary DB에 실행
-               secondaryDS.save(memo);
-               
-               // 양쪽 모두 성공 시 커밋
-               return savedMemo;
-               
-           } catch (Exception e) {
-               // 실패 시 Primary도 롤백
-               if (savedMemo != null) {
-                   try {
-                       primaryDS.delete(savedMemo.getId());
-                   } catch (Exception rollbackError) {
-                       // 롤백 실패 로깅
-                   }
-               }
-               throw e;
-           }
-       }
-   }
-   ```
-
-5. **Read Failover 로직**
-   ```java
-   @Service
-   public class DualMasterMemoService {
-       
-       public List<Memo> getMemos(User user, Long userBookId) {
-           // Primary DB에서 시도
-           try {
-               return primaryDS.findByUserBookId(userBookId);
-           } catch (Exception e) {
-               // Primary 실패 시 Secondary 시도
-               log.warn("Primary DB 접근 실패, Secondary DB로 전환", e);
-               return secondaryDS.findByUserBookId(userBookId);
-           }
-       }
-   }
-   ```
-
-#### 옵션 2: 2PC (Two-Phase Commit) 패턴
+#### 옵션 2: 2PC (Two-Phase Commit) 패턴 (비권장)
 
 **장점**:
 - 강력한 일관성 보장
@@ -437,76 +797,347 @@ class NetworkMonitor {
 - 구현 복잡도 높음
 - 성능 오버헤드
 - JTA 라이브러리 필요 (Atomikos, Bitronix)
+- MySQL Replication 사용 불가 환경에서는 과도한 복잡성
 
-**구현 예시**:
-```java
-@Service
-public class DualMasterMemoService {
-    
-    @Autowired
-    @Qualifier("jtaTransactionManager")
-    private PlatformTransactionManager transactionManager;
-    
-    @Transactional
-    public Memo createMemo(User user, Memo memo) {
-        // JTA가 자동으로 2PC 처리
-        return memoRepository.save(memo);
-    }
-}
-```
+**참고**: 본 프로젝트에서는 Custom Dual Write 전략을 권장합니다.
 
 ### 수정이 필요한 Service 메서드
 
 현재 프로젝트에서 `@Transactional` 어노테이션이 있는 메서드:
 
-1. **MemoService** (7개)
-   - `createMemo()`: Write
-   - `updateMemo()`: Write
-   - `deleteMemo()`: Write
-   - `getMemoById()`: Read
-   - `getTodayFlowGroupedByBook()`: Read
-   - `getTodayFlowGroupedByTag()`: Read
-   - `getBookMemosByDate()`: Read
-   - `getAllBookMemos()`: Read
-   - `getBooksWithRecentMemos()`: Read
-   - `closeBook()`: Write
-   - `getMemoDates()`: Read
+#### Write 작업 (Custom Dual Write 적용 필요)
 
-2. **UserService** (1개)
-   - `getUserByLoginId()`: Read
+1. **MemoService** (4개)
+   - `createMemo()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용
+   - `updateMemo()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용
+   - `deleteMemo()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용
+   - `closeBook()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용
 
-3. **BookService** (2개)
-   - `addBookToShelf()`: Write
-   - `getBooksByCategory()`: Read
+2. **UserService** (0개)
+   - Write 작업 없음
+
+3. **BookService** (1개)
+   - `addBookToShelf()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용
 
 4. **AuthService** (1개)
-   - `register()`: Write
+   - `register()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용
 
-5. **JwtService** (3개)
-   - `generateTokens()`: Write
-   - `refreshAccessToken()`: Write
-   - `validateToken()`: Read
+5. **JwtService** (2개)
+   - `generateTokens()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용
+   - `refreshAccessToken()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용
 
-6. **UserDeviceService** (3개)
-   - `registerDevice()`: Write
-   - `getUserDevices()`: Read
-   - `deleteDevice()`: Write
+6. **UserDeviceService** (2개)
+   - `registerDevice()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용
+   - `deleteDevice()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용
 
-**총 17개 메서드 수정 필요**
+**총 Write 작업: 10개 메서드 수정 필요**
+
+#### Read 작업 (Read Failover 적용 필요)
+
+1. **MemoService** (7개)
+   - `getMemoById()`: Read → `DualMasterReadService.readWithFailover()` 적용
+   - `getTodayFlowGroupedByBook()`: Read → `DualMasterReadService.readWithFailover()` 적용
+   - `getTodayFlowGroupedByTag()`: Read → `DualMasterReadService.readWithFailover()` 적용
+   - `getBookMemosByDate()`: Read → `DualMasterReadService.readWithFailover()` 적용
+   - `getAllBookMemos()`: Read → `DualMasterReadService.readWithFailover()` 적용
+   - `getBooksWithRecentMemos()`: Read → `DualMasterReadService.readWithFailover()` 적용
+   - `getMemoDates()`: Read → `DualMasterReadService.readWithFailover()` 적용
+
+2. **UserService** (1개)
+   - `getUserByLoginId()`: Read → `DualMasterReadService.readWithFailover()` 적용
+
+3. **BookService** (1개)
+   - `getBooksByCategory()`: Read → `DualMasterReadService.readWithFailover()` 적용
+
+4. **JwtService** (1개)
+   - `validateToken()`: Read → `DualMasterReadService.readWithFailover()` 적용
+
+5. **UserDeviceService** (1개)
+   - `getUserDevices()`: Read → `DualMasterReadService.readWithFailover()` 적용
+
+**총 Read 작업: 11개 메서드 수정 필요**
+
+**전체 수정 필요: 21개 메서드**
 
 ### 데이터 무결성 보장
 
-#### 1. 동기화 검증
+#### 1. 일관성 보장 전략
+- **Primary 우선 원칙**: 모든 쓰기는 Primary에 먼저 실행
+- **Secondary 실패 시 보상 트랜잭션**: Primary에서 DELETE 또는 원래 상태로 복구
+- **Primary 실패 시 즉시 Exception**: Secondary로의 쓰기 Failover는 허용하지 않음 (데이터 일관성 유지)
+
+#### 2. 동기화 검증
 - 주기적으로 두 DB의 데이터 일관성 검증
 - 불일치 발견 시 알림 및 복구
+- 보상 트랜잭션 실행 로그 모니터링
 
-#### 2. 충돌 해결
+#### 3. 충돌 해결
 - 동일한 레코드에 대한 동시 수정 시 처리
 - Last-Write-Wins 또는 사용자 확인 방식
+- 보상 트랜잭션으로 일관성 유지
 
-#### 3. 롤백 메커니즘
-- Write 작업 실패 시 양쪽 DB 모두 롤백
-- 트랜잭션 로그를 통한 복구
+#### 4. 보상 트랜잭션 메커니즘
+- **CREATE 실패**: Secondary 실패 시 Primary에서 DELETE
+- **UPDATE 실패**: Secondary 실패 시 Primary에서 원래 상태로 복구 (이전 버전 저장 필요)
+- **DELETE 실패**: Secondary 실패 시 Primary에서 복구 불가 (로깅만 수행)
+- 보상 트랜잭션 실패 시 로깅 및 알림
+
+#### 5. 보상 트랜잭션 실패 처리 전략
+
+##### 개요
+
+이 커스텀 이중화 환경에서 보상 트랜잭션마저 실패하는 상황은 실제로 시스템에서 발생할 수 있는 가장 심각한 데이터 불일치 상태입니다. 이러한 상황은 복잡하고 위험한 분산 트랜잭션 관리의 난제를 보여줍니다. 성공적인 보상 트랜잭션 실패 처리 전략은 동기적 트랜잭션에서 벗어나 **비동기적 복구(Asynchronous Recovery)** 메커니즘으로 전환하는 것입니다.
+
+##### 1. 보상 트랜잭션 실패 시의 상태
+
+보상 트랜잭션(Primary DB에서 DELETE를 시도하는 과정)이 실패했다는 것은 보통 다음과 같은 상황을 의미합니다:
+
+**P1 (Primary Write) 상태**:
+- Primary DB: 커밋 완료 (데이터 존재)
+- Secondary DB: 커밋 실패 (데이터 없음)
+
+**P3 (Compensation) 상태**:
+- Primary DB: 삭제 실패 (여전히 데이터 존재)
+- Secondary DB: 변경 없음 (데이터 없음)
+
+**최종 상태**: **데이터 불일치 (Inconsistency) - Primary에만 존재**
+
+이 상태는 애플리케이션이 사용자에게는 '쓰기 실패'를 알렸으나, Primary DB에는 불필요한 데이터가 남은 상태입니다. 이 데이터는 Secondary DB의 데이터와 영구적으로 불일치하게 됩니다.
+
+##### 2. 해결 전략: 비동기 복구 메커니즘 도입
+
+보상 트랜잭션 실패는 동기적으로 처리할 수 있는 범위를 벗어난 것입니다. 애플리케이션은 즉시 로그를 기록하고 **경고(Alert)**를 발생시킨 후, 비동기적인 복구 시스템에게 이 문제를 위임해야 합니다.
+
+###### A. 필수 조치: 로그 및 모니터링
+
+보상 트랜잭션이 실패하는 catch 블록 내에서 가장 높은 수준의 **CRITICAL** 로그를 남겨야 합니다.
+
+**로그 기록 내용**:
+- 실패한 트랜잭션의 ID (예: `memoId`)
+- 실패 시간
+- 발생한 예외 (`compensationEx`)
+- 이 상태가 데이터 불일치를 유발했음을 명시
+
+**구현 예시**:
+```java
+catch (Exception compensationError) {
+    log.error("보상 트랜잭션 실행 실패", compensationError);
+    
+    // CRITICAL 로그 기록
+    log.error("CRITICAL: 보상 트랜잭션 실패로 인한 데이터 불일치 발생. " +
+              "memoId: {}, failureTime: {}, error: {}", 
+              savedMemo.getId(), 
+              Instant.now(), 
+              compensationError.getMessage());
+    
+    // 경고(Alerting) 발생
+    alertService.sendCriticalAlert(
+        "보상 트랜잭션 실패",
+        String.format("memoId: %d, Primary DB에 불일치 데이터 존재", savedMemo.getId())
+    );
+    
+    // 원래 Exception을 던짐
+    throw new DatabaseWriteException("Secondary DB 쓰기 실패, Primary 보상 트랜잭션 실행됨", e);
+}
+```
+
+**경고(Alerting) 시스템**:
+- 이 CRITICAL 로그가 발생하면, 즉시 운영자(교수님 또는 개발자)에게 SMS, 이메일, 슬랙 등으로 알림이 가도록 시스템을 구축해야 합니다.
+- 모니터링 시스템(예: Prometheus + AlertManager)과 연동하여 자동 알림 설정
+
+###### B. 자동화된 복구 (권장 방안)
+
+수동 개입은 느리고 휴먼 에러의 가능성이 있으므로, 자동화된 비동기 복구 시스템을 사용하는 것이 이상적입니다.
+
+**Dead Letter Queue (DLQ) 또는 복구 큐에 발행**:
+
+보상 트랜잭션이 실패하는 즉시, 해당 작업 정보를 **메시지 큐(Kafka, RabbitMQ 등)**에 발행합니다.
+
+**구현 예시**:
+```java
+catch (Exception compensationError) {
+    log.error("CRITICAL: 보상 트랜잭션 실패", compensationError);
+    
+    // 복구 큐에 발행
+    CompensationFailureEvent event = CompensationFailureEvent.builder()
+        .action("Compensation_Failure")
+        .entityId(savedMemo.getId())
+        .entityType("Memo")
+        .targetDB("Primary")
+        .failureTime(Instant.now())
+        .errorMessage(compensationError.getMessage())
+        .build();
+    
+    recoveryQueueService.publish(event);
+    
+    alertService.sendCriticalAlert("보상 트랜잭션 실패", event.toString());
+    
+    throw new DatabaseWriteException("Secondary DB 쓰기 실패, 복구 큐에 발행됨", e);
+}
+```
+
+**복구 작업자(Repair Worker) 실행**:
+
+복구 작업자는 큐에서 실패 메시지를 가져와 일정 시간(예: 1분) 간격으로 재시도를 수행합니다.
+
+**구현 예시**:
+```java
+@Service
+public class CompensationRecoveryWorker {
+    
+    @Autowired
+    private MemoRepository memoRepository;
+    
+    @Scheduled(fixedDelay = 60000) // 1분마다 실행
+    public void processRecoveryQueue() {
+        List<CompensationFailureEvent> events = recoveryQueueService.consume();
+        
+        for (CompensationFailureEvent event : events) {
+            try {
+                // Primary DB에 접속하여 DELETE 실행
+                if ("DELETE".equals(event.getAction())) {
+                    memoRepository.deleteById(event.getEntityId());
+                    log.info("복구 성공: memoId={}", event.getEntityId());
+                    recoveryQueueService.acknowledge(event);
+                }
+            } catch (Exception e) {
+                log.warn("복구 재시도 실패: memoId={}, retryCount={}", 
+                        event.getEntityId(), event.getRetryCount());
+                
+                // 최대 재시도 횟수 초과 시 수동 개입 필요 알림
+                if (event.getRetryCount() >= MAX_RETRY_COUNT) {
+                    alertService.sendCriticalAlert(
+                        "복구 작업 실패",
+                        String.format("memoId: %d, 수동 개입 필요", event.getEntityId())
+                    );
+                } else {
+                    recoveryQueueService.requeue(event);
+                }
+            }
+        }
+    }
+}
+```
+
+**핵심**: 이 재시도는 동기 요청을 막지 않고, 백그라운드에서 실행됩니다.
+
+###### C. 수동 개입 (최후의 수단)
+
+복구 큐 시스템마저 영구적으로 작동하지 않거나, 복구 작업자도 알 수 없는 오류로 계속 실패할 때 사용합니다.
+
+**절차**:
+1. **로그/경고 시스템 확인**: 운영자는 발생한 CRITICAL 로그를 확인하고, 불일치 ID (memoId)를 파악합니다.
+2. **DB 접속 및 검증**: Primary DB에 직접 접속하여 해당 ID의 데이터가 정말로 존재하는지 확인합니다.
+   ```sql
+   SELECT * FROM memo WHERE id = 12345;
+   ```
+3. **수동 삭제 실행**: 데이터가 존재함을 확인하고, 해당 데이터를 직접 DELETE 쿼리로 제거합니다.
+   ```sql
+   DELETE FROM memo WHERE id = 12345;
+   ```
+
+이러한 수동 개입은 최후의 수단이며, 이는 곧 시스템이 제대로 작동하지 않고 있음을 의미합니다.
+
+##### 3. Repair Worker의 역할과 분리 필요성
+
+Repair Worker의 주된 역할은 데이터 불일치와 같은 시스템의 심각한 실패를 복구하는 것입니다. 이 기능은 핵심 비즈니스 로직(예: 사용자 요청을 처리하는 `DualMasterWriteService`)과 분리되어야 합니다.
+
+###### A. 분리해야 하는 이유 (Isolation)
+
+1. **실패 격리 (Failure Isolation)**: 
+   - 만약 Primary/Secondary DB에 동시에 부하가 걸려 server 애플리케이션 자체가 다운되더라도, 복구 작업자는 독립적으로 살아남아 복구 작업을 수행할 수 있어야 합니다.
+
+2. **독립적인 확장 (Scalability)**: 
+   - 복구 작업은 보통 비동기적이며 낮은 우선순위를 갖습니다. 이 작업을 웹 요청 처리와 분리해야 각 워크로드를 독립적으로 확장할 수 있습니다.
+
+이러한 패턴을 **Outbox 패턴** 또는 **Saga 패턴**의 비동기 복구 단계라고 부르며, 일반적으로 별도의 마이크로서비스 또는 전용 메시지 큐 컨슈머로 구현됩니다.
+
+###### B. 현재 구조 내에서의 권장 배치
+
+현재 프로젝트가 단일 배포 환경을 목표로 한다면, `server` 디렉토리 내의 `service` 레이어에 배치하되, 관심사 분리를 위해 전용 패키지를 사용합니다.
+
+**권장 패키지 구조**:
+```
+src/main/java/com/readingtracker/server/
+├── config/                    # 설정 클래스
+│   └── DualMasterDataSourceConfig.java
+├── service/
+│   ├── recovery/              # 복구 관련 서비스
+│   │   ├── CompensationRecoveryWorker.java
+│   │   ├── RecoveryQueueService.java
+│   │   └── CompensationFailureEvent.java
+│   ├── write/
+│   │   └── DualMasterWriteService.java
+│   └── read/
+│       └── DualMasterReadService.java
+```
+
+**구현 예시**:
+```java
+package com.readingtracker.server.service.recovery;
+
+@Service
+@Slf4j
+public class CompensationRecoveryWorker {
+    
+    @Autowired
+    private RecoveryQueueService recoveryQueueService;
+    
+    @Autowired
+    private MemoRepository memoRepository;
+    
+    @Autowired
+    private AlertService alertService;
+    
+    private static final int MAX_RETRY_COUNT = 10;
+    
+    /**
+     * 복구 큐에서 실패한 보상 트랜잭션을 처리
+     * 1분마다 실행 (백그라운드 스레드)
+     */
+    @Scheduled(fixedDelay = 60000)
+    public void processRecoveryQueue() {
+        List<CompensationFailureEvent> events = recoveryQueueService.consume();
+        
+        for (CompensationFailureEvent event : events) {
+            processRecoveryEvent(event);
+        }
+    }
+    
+    private void processRecoveryEvent(CompensationFailureEvent event) {
+        try {
+            // Primary DB에서 DELETE 실행
+            if ("DELETE".equals(event.getCompensationAction())) {
+                memoRepository.deleteById(event.getEntityId());
+                log.info("복구 성공: entityType={}, entityId={}", 
+                         event.getEntityType(), event.getEntityId());
+                recoveryQueueService.acknowledge(event);
+            }
+        } catch (Exception e) {
+            handleRecoveryFailure(event, e);
+        }
+    }
+    
+    private void handleRecoveryFailure(CompensationFailureEvent event, Exception e) {
+        int retryCount = event.incrementRetryCount();
+        log.warn("복구 재시도 실패: entityId={}, retryCount={}", 
+                event.getEntityId(), retryCount);
+        
+        if (retryCount >= MAX_RETRY_COUNT) {
+            // 최대 재시도 횟수 초과 시 수동 개입 필요 알림
+            alertService.sendCriticalAlert(
+                "복구 작업 실패",
+                String.format("entityType: %s, entityId: %d, 수동 개입 필요", 
+                             event.getEntityType(), event.getEntityId())
+            );
+            recoveryQueueService.markAsFailed(event);
+        } else {
+            // 재시도 큐에 다시 추가
+            recoveryQueueService.requeue(event);
+        }
+    }
+}
+```
 
 ### 모니터링
 
@@ -522,42 +1153,82 @@ public class DualMasterMemoService {
    - Primary → Secondary 전환 횟수
    - Failover 성공/실패 통계
 
+4. **보상 트랜잭션 모니터링** ⚠️ **중요**
+   - 보상 트랜잭션 실행 횟수
+   - 보상 트랜잭션 실패 횟수 (CRITICAL)
+   - 데이터 불일치 발생 횟수
+   - 복구 큐 대기 중인 작업 수
+   - 복구 작업자 성공/실패 통계
+   - 수동 개입 필요 알림 횟수
+
+5. **경고(Alert) 시스템**
+   - CRITICAL 로그 발생 시 즉시 알림 (SMS, 이메일, 슬랙)
+   - 보상 트랜잭션 실패 알림
+   - 복구 작업 실패 알림
+   - 데이터 불일치 감지 알림
+
 ---
 
-## 클라이언트 기능 완성
+## 클라이언트 기능 완성 ✅ 구현 완료
 
 ### 웹 UI 오프라인 동기화
 
-#### 구현 단계
+#### 구현 단계 ✅ 모두 완료
 
-1. **IndexedDB 스키마 설계**
-   - `offline_memos` 테이블
-   - `sync_queue` 테이블
-   - 인덱스 설계
+1. **IndexedDB 스키마 설계** ✅
+   - `offline_memos` 테이블 (로컬 메모 저장)
+     - 인덱스: `syncStatus`, `userBookId`, `memoStartTime`, `serverId`
+   - `sync_queue` 테이블 (동기화 큐)
+     - 인덱스: `status`, `localMemoId`
+   - 하이브리드 전략: 최근 7일 메모만 보관
 
-2. **오프라인 메모 작성 기능**
-   - 로컬 ID 생성 (UUID)
-   - 로컬 저장소에 저장
-   - UI 즉시 업데이트
+2. **오프라인 메모 작성 기능** ✅
+   - 로컬 ID 생성 (UUID v4)
+   - 로컬 저장소에 저장 (IndexedDB)
+   - UI 즉시 업데이트 (Optimistic UI)
+   - 메모 수정/삭제도 오프라인 지원
 
-3. **동기화 큐 관리**
-   - 큐 항목 생성/관리
-   - 상태 관리 (PENDING, SYNCING, SUCCESS, FAILED)
-   - 재시도 로직
+3. **동기화 큐 관리** ✅
+   - 큐 항목 생성/관리 (`SyncQueueManager`)
+   - 상태 관리: `PENDING`, `WAITING`, `SYNCING`, `SUCCESS`, `FAILED`
+   - `originalQueueId` 지원 (시나리오 2, 5: WAITING 상태 처리)
+   - 재시도 로직 (Exponential Backoff, 최대 3회)
 
-4. **네트워크 복구 감지**
+4. **네트워크 복구 감지** ✅
    - `navigator.onLine` API
-   - `online` 이벤트 리스너
+   - `online` / `offline` 이벤트 리스너
+   - 2-Phase Health Check (로컬 서버 + 외부 서비스)
    - 자동 동기화 트리거
+   - Service Worker 백그라운드 동기화
 
-5. **UI 통합**
-   - 동기화 상태 표시
-   - 에러 피드백
-   - 수동 재시도 버튼
+5. **UI 통합** ✅
+   - 동기화 상태 표시 (메모 카드에 아이콘)
+     - `pending`: ⏳ 대기 중
+     - `syncing`: 🔄 동기화 중
+     - `waiting`: ⏸️ 대기 중 (다른 작업 완료 대기)
+     - `failed`: ❌ 실패
+   - Toast 메시지로 동기화 결과 피드백
+   - 에러 피드백 (동기화 실패 시)
+
+6. **데이터 무결성 보장** ✅
+   - 시나리오 1: 동기화 중 메모 수정 허용 (`syncing_create` 상태)
+   - 시나리오 2, 5: WAITING 상태 처리 (원본 항목 완료 대기)
+   - 시나리오 6: mergeMemos에서 중복 방지 (동기화 대기 중인 메모 우선 표시)
+   - 서버 측 멱등성 보장 (Redis 기반)
+
+7. **Service Worker 통합** ✅
+   - 네트워크 요청 가로채기
+   - 실패한 요청을 동기화 큐에 저장
+   - 백그라운드 동기화 실행
+   - WAITING 상태 처리 로직
 
 #### 상세 구현 가이드
 
 [OFFLINE_MEMO_SYNC.md](./OFFLINE_MEMO_SYNC.md) 문서 참조
+
+#### 데이터 무결성 분석
+
+[OFFLINE_SYNC_DATA_INTEGRITY_ANALYSIS.md](./OFFLINE_SYNC_DATA_INTEGRITY_ANALYSIS.md) 문서 참조
 
 ---
 
@@ -618,67 +1289,166 @@ async syncPendingMemos() {
 
 ### 시나리오 2: MySQL 이중화
 
-#### 커스텀 트랜잭션 매니저
+#### 데이터 소스 및 트랜잭션 관리자 설정
 
 ```java
-public class DualMasterTransactionManager {
+package com.readingtracker.server.config;
+
+@Configuration
+public class DualMasterDataSourceConfig {
     
-    private final DataSource primaryDS;
-    private final DataSource secondaryDS;
+    @Bean
+    @Primary
+    @ConfigurationProperties("spring.datasource.primary")
+    public DataSource primaryDataSource() {
+        return DataSourceBuilder.create().build();
+    }
     
-    public <T> T executeInTransaction(
-            Function<DataSource, T> operation) {
-        
-        T primaryResult = null;
-        boolean primarySuccess = false;
-        
+    @Bean
+    @ConfigurationProperties("spring.datasource.secondary")
+    public DataSource secondaryDataSource() {
+        return DataSourceBuilder.create().build();
+    }
+    
+    @Bean
+    @Primary
+    public PlatformTransactionManager primaryTransactionManager(
+            @Qualifier("primaryDataSource") DataSource primaryDataSource) {
+        return new DataSourceTransactionManager(primaryDataSource);
+    }
+    
+    @Bean
+    public PlatformTransactionManager secondaryTransactionManager(
+            @Qualifier("secondaryDataSource") DataSource secondaryDataSource) {
+        return new DataSourceTransactionManager(secondaryDataSource);
+    }
+    
+    @Bean
+    @Primary
+    public JdbcTemplate primaryJdbcTemplate(
+            @Qualifier("primaryDataSource") DataSource primaryDataSource) {
+        return new JdbcTemplate(primaryDataSource);
+    }
+    
+    @Bean
+    public JdbcTemplate secondaryJdbcTemplate(
+            @Qualifier("secondaryDataSource") DataSource secondaryDataSource) {
+        return new JdbcTemplate(secondaryDataSource);
+    }
+}
+```
+
+#### Read Failover 구현
+
+```java
+@Service
+public class DualMasterReadService {
+    
+    @Autowired
+    @Qualifier("primaryTransactionManager")
+    private PlatformTransactionManager primaryTxManager;
+    
+    @Autowired
+    @Qualifier("secondaryTransactionManager")
+    private PlatformTransactionManager secondaryTxManager;
+    
+    @Autowired
+    @Qualifier("primaryJdbcTemplate")
+    private JdbcTemplate primaryJdbcTemplate;
+    
+    @Autowired
+    @Qualifier("secondaryJdbcTemplate")
+    private JdbcTemplate secondaryJdbcTemplate;
+    
+    /**
+     * Primary에서 읽기 시도, 실패 시 Secondary로 Failover
+     */
+    public <T> T readWithFailover(Function<JdbcTemplate, T> readOperation) {
+        // Primary에서 시도
         try {
-            // Phase 1: Primary DB에 실행
-            primaryResult = operation.apply(primaryDS);
-            primarySuccess = true;
-            
-            // Phase 2: Secondary DB에 실행
-            operation.apply(secondaryDS);
-            
-            // 양쪽 모두 성공 시 커밋
-            return primaryResult;
-            
+            TransactionTemplate txTemplate = new TransactionTemplate(primaryTxManager);
+            return txTemplate.execute(status -> readOperation.apply(primaryJdbcTemplate));
         } catch (Exception e) {
-            // 실패 시 Primary도 롤백
-            if (primarySuccess && primaryResult != null) {
-                try {
-                    rollbackPrimary(primaryResult);
-                } catch (Exception rollbackError) {
-                    log.error("Primary DB 롤백 실패", rollbackError);
-                }
+            log.warn("Primary DB 읽기 실패, Secondary DB로 전환", e);
+            
+            // Secondary에서 시도
+            try {
+                TransactionTemplate txTemplate = new TransactionTemplate(secondaryTxManager);
+                return txTemplate.execute(status -> readOperation.apply(secondaryJdbcTemplate));
+            } catch (Exception e2) {
+                log.error("Secondary DB 읽기도 실패", e2);
+                throw new DatabaseUnavailableException("모든 DB 접근 실패", e2);
             }
-            throw e;
         }
     }
 }
 ```
 
-#### Read Failover
+#### Custom Dual Write 및 보상 트랜잭션 구현
 
 ```java
-public class DualMasterReadService {
+@Service
+public class DualMasterWriteService {
     
-    public <T> T readWithFailover(
-            Function<DataSource, T> readOperation) {
+    @Autowired
+    @Qualifier("primaryTransactionManager")
+    private PlatformTransactionManager primaryTxManager;
+    
+    @Autowired
+    @Qualifier("secondaryTransactionManager")
+    private PlatformTransactionManager secondaryTxManager;
+    
+    @Autowired
+    @Qualifier("primaryJdbcTemplate")
+    private JdbcTemplate primaryJdbcTemplate;
+    
+    @Autowired
+    @Qualifier("secondaryJdbcTemplate")
+    private JdbcTemplate secondaryJdbcTemplate;
+    
+    /**
+     * Custom Dual Write: Primary → Secondary 순차 쓰기
+     * Secondary 실패 시 Primary에 보상 트랜잭션 실행
+     */
+    public <T> T writeWithDualWrite(Function<JdbcTemplate, T> writeOperation,
+                                     Function<T, Void> compensationOperation) {
+        T primaryResult = null;
         
-        // Primary DB에서 시도
+        // Phase 1: Primary에 쓰기
         try {
-            return readOperation.apply(primaryDS);
+            TransactionTemplate primaryTx = new TransactionTemplate(primaryTxManager);
+            primaryResult = primaryTx.execute(status -> writeOperation.apply(primaryJdbcTemplate));
         } catch (Exception e) {
-            log.warn("Primary DB 읽기 실패, Secondary DB로 전환", e);
+            // Primary 실패 시 즉시 Exception (Secondary로 Failover 불가)
+            log.error("Primary DB 쓰기 실패", e);
+            throw new DatabaseWriteException("Primary DB 쓰기 실패", e);
+        }
+        
+        // Phase 2: Secondary에 쓰기
+        try {
+            TransactionTemplate secondaryTx = new TransactionTemplate(secondaryTxManager);
+            secondaryTx.execute(status -> writeOperation.apply(secondaryJdbcTemplate));
             
-            // Secondary DB에서 시도
+            // 양쪽 모두 성공
+            return primaryResult;
+            
+        } catch (Exception e) {
+            // Secondary 실패 시 Primary에 보상 트랜잭션 실행
+            log.error("Secondary DB 쓰기 실패, Primary에 보상 트랜잭션 실행", e);
+            
             try {
-                return readOperation.apply(secondaryDS);
-            } catch (Exception e2) {
-                log.error("Secondary DB 읽기도 실패", e2);
-                throw new DatabaseUnavailableException("모든 DB 접근 실패", e2);
+                TransactionTemplate compensationTx = new TransactionTemplate(primaryTxManager);
+                compensationTx.execute(status -> {
+                    compensationOperation.apply(primaryResult);
+                    return null;
+                });
+            } catch (Exception compensationError) {
+                log.error("보상 트랜잭션 실행 실패", compensationError);
+                // 보상 트랜잭션 실패는 로깅만 하고, 원래 Exception을 던짐
             }
+            
+            // Secondary 실패 Exception 발생
+            throw new DatabaseWriteException("Secondary DB 쓰기 실패, Primary 보상 트랜잭션 실행됨", e);
         }
     }
 }
@@ -691,26 +1461,72 @@ public class DualMasterReadService {
 public class MemoService {
     
     @Autowired
-    private DualMasterTransactionManager transactionManager;
+    private DualMasterWriteService writeService;
     
     @Autowired
     private DualMasterReadService readService;
     
-    // Write 작업
+    @Autowired
+    private MemoRepository memoRepository;
+    
+    // Write 작업: Custom Dual Write
     public Memo createMemo(User user, Memo memo) {
-        return transactionManager.executeInTransaction(ds -> {
-            // Primary와 Secondary 모두에 실행
-            MemoRepository repo = new MemoRepository(ds);
-            return repo.save(memo);
-        });
+        return writeService.writeWithDualWrite(
+            // 쓰기 작업
+            jdbcTemplate -> {
+                return memoRepository.save(memo);
+            },
+            // 보상 트랜잭션 (Secondary 실패 시 Primary에서 DELETE)
+            savedMemo -> {
+                memoRepository.deleteById(savedMemo.getId());
+                return null;
+            }
+        );
     }
     
-    // Read 작업
-    @Transactional(readOnly = true)
-    public List<Memo> getMemos(User user, Long userBookId) {
-        return readService.readWithFailover(ds -> {
-            MemoRepository repo = new MemoRepository(ds);
-            return repo.findByUserBookId(userBookId);
+    // Write 작업: UPDATE
+    public Memo updateMemo(User user, Long memoId, MemoUpdateRequest request) {
+        // 이전 상태 저장 (보상 트랜잭션을 위해)
+        Memo originalMemo = memoRepository.findById(memoId)
+            .orElseThrow(() -> new MemoNotFoundException(memoId));
+        Memo originalState = originalMemo.copy(); // 이전 상태 복사
+        
+        return writeService.writeWithDualWrite(
+            // 쓰기 작업
+            jdbcTemplate -> {
+                originalMemo.update(request);
+                return memoRepository.save(originalMemo);
+            },
+            // 보상 트랜잭션 (Secondary 실패 시 Primary에서 원래 상태로 복구)
+            updatedMemo -> {
+                memoRepository.save(originalState); // 원래 상태로 복구
+                return null;
+            }
+        );
+    }
+    
+    // Write 작업: DELETE
+    public void deleteMemo(User user, Long memoId) {
+        writeService.writeWithDualWrite(
+            // 쓰기 작업
+            jdbcTemplate -> {
+                memoRepository.deleteById(memoId);
+                return null;
+            },
+            // 보상 트랜잭션 (Secondary 실패 시 Primary에서 복구)
+            // DELETE의 보상은 복구가 어려우므로, 로깅만 수행
+            result -> {
+                log.warn("DELETE 보상 트랜잭션: Primary에서 삭제된 메모 복구 불가 (memoId: {})", memoId);
+                return null;
+            }
+        );
+    }
+    
+    // Read 작업: Read Failover
+    public List<Memo> getAllBookMemos(User user, Long userBookId) {
+        return readService.readWithFailover(jdbcTemplate -> {
+            // Primary 또는 Secondary에서 읽기
+            return memoRepository.findByUserBookId(userBookId);
         });
     }
 }
@@ -741,12 +1557,27 @@ public class MemoService {
 - 동기화 지연
 - 분산 트랜잭션 실패
 - Failover 실패
+- **보상 트랜잭션 실패** ⚠️ **최고 위험도**
+  - Primary DB에 불일치 데이터 영구 존재
+  - Secondary DB와 데이터 불일치 상태 지속
+  - 사용자에게는 실패로 알려졌으나 실제로는 Primary에 데이터 존재
+- 복구 작업자 실패
+- 복구 큐 시스템 장애
 
 **완화 방안**:
 - 주기적인 데이터 일관성 검증
 - Replication 지연 모니터링
-- 자동 복구 메커니즘
+- 자동 복구 메커니즘 (Repair Worker)
 - 장애 시나리오 테스트
+- **보상 트랜잭션 실패 처리**:
+  - CRITICAL 로그 기록 및 즉시 알림
+  - 비동기 복구 메커니즘 (DLQ + Repair Worker)
+  - 수동 개입 절차 문서화
+  - 보상 트랜잭션 실패 모니터링 및 대시보드
+- **복구 시스템 격리**:
+  - Repair Worker를 핵심 비즈니스 로직과 분리
+  - 독립적인 확장 및 장애 격리
+  - 복구 큐 시스템 모니터링
 
 ### 구현 순서의 중요성
 
@@ -754,11 +1585,6 @@ public class MemoService {
 - ✅ 안정적인 백엔드 API 위에서 클라이언트 개발
 - ✅ 각 단계 독립적으로 검증 가능
 - ✅ 인프라 변경 시 클라이언트 기능은 안정적
-
-**옵션 B (비권장)**: 인프라 개선 먼저 → 클라이언트 기능
-- ❌ 불안정한 인프라 위에서 클라이언트 개발
-- ❌ 인프라 버그가 클라이언트 개발 지연
-- ❌ 전체 시스템 불안정
 
 ---
 

@@ -7,6 +7,7 @@ import com.readingtracker.dbms.entity.UserShelfBook;
 import com.readingtracker.dbms.repository.BookRepository;
 import com.readingtracker.dbms.repository.UserShelfBookRepository;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -14,6 +15,8 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 @Service
 @Transactional
@@ -24,6 +27,12 @@ public class BookService {
     
     @Autowired
     private UserShelfBookRepository userBookRepository;
+    
+    @Autowired
+    private RedisTemplate<String, Object> redisTemplate;
+    
+    private static final String CACHE_KEY_PREFIX = "my_shelf:user:";
+    private static final long TTL_MINUTES = 5; // 5분 (안전망 역할)
     
     /**
      * 내 서재에 책 추가
@@ -67,7 +76,12 @@ public class BookService {
         validateCategorySpecificFields(userShelfBook);
         
         // 5. UserShelfBook 저장
-        return userBookRepository.save(userShelfBook);
+        UserShelfBook savedUserShelfBook = userBookRepository.save(userShelfBook);
+        
+        // 6. 내 서재 캐시 무효화 (Write-Through 패턴)
+        invalidateMyShelfCache(userShelfBook.getUserId());
+        
+        return savedUserShelfBook;
     }
     
     /**
@@ -199,7 +213,12 @@ public class BookService {
         userBook.setCategoryManuallySet(true);
         userBook.setUpdatedAt(LocalDateTime.now());
         
-        return userBookRepository.save(userBook);
+        UserShelfBook savedBook = userBookRepository.save(userBook);
+        
+        // 내 서재 캐시 무효화 (Write-Through 패턴)
+        invalidateMyShelfCache(userBook.getUserId());
+        
+        return savedBook;
     }
     
     /**
@@ -207,17 +226,55 @@ public class BookService {
      * userId를 받아서 처리
      */
     @Transactional(readOnly = true)
+    @SuppressWarnings("unchecked")
     public List<UserShelfBook> getMyShelf(Long userId, BookCategory category, BookSortCriteria sortBy) {
         // 1. 정렬 기준이 지정되지 않은 경우 기본값은 도서명 오름차순
         if (sortBy == null) {
             sortBy = BookSortCriteria.TITLE;
         }
         
-        // 2. 카테고리와 정렬 기준에 따라 내 서재 조회
+        // 2. 캐시 키 생성
+        String cacheKey = buildCacheKey(userId, category, sortBy);
+        
+        // 3. Redis 캐시 확인
+        List<UserShelfBook> cachedBooks = (List<UserShelfBook>) redisTemplate.opsForValue().get(cacheKey);
+        if (cachedBooks != null) {
+            return cachedBooks;
+        }
+        
+        // 4. DB 조회
+        List<UserShelfBook> books;
         if (category != null) {
-            return getMyShelfByCategoryAndSort(userId, category, sortBy);
+            books = getMyShelfByCategoryAndSort(userId, category, sortBy);
         } else {
-            return getMyShelfBySort(userId, sortBy);
+            books = getMyShelfBySort(userId, sortBy);
+        }
+        
+        // 5. Redis에 저장 (TTL: 5분)
+        redisTemplate.opsForValue().set(cacheKey, books, TTL_MINUTES, TimeUnit.MINUTES);
+        
+        return books;
+    }
+    
+    /**
+     * 캐시 키 생성
+     */
+    private String buildCacheKey(Long userId, BookCategory category, BookSortCriteria sortBy) {
+        if (category != null) {
+            return CACHE_KEY_PREFIX + userId + ":category:" + category.name() + ":sort:" + sortBy.name();
+        } else {
+            return CACHE_KEY_PREFIX + userId + ":sort:" + sortBy.name();
+        }
+    }
+    
+    /**
+     * 사용자의 모든 내 서재 캐시 무효화 (Write-Through 패턴)
+     */
+    private void invalidateMyShelfCache(Long userId) {
+        String pattern = CACHE_KEY_PREFIX + userId + ":*";
+        Set<String> keys = redisTemplate.keys(pattern);
+        if (keys != null && !keys.isEmpty()) {
+            redisTemplate.delete(keys);
         }
     }
     
@@ -263,8 +320,13 @@ public class BookService {
      */
     public void removeBookFromShelf(UserShelfBook userBook) {
         // 소유권 확인은 Controller에서 이미 완료된 것으로 가정
+        Long userId = userBook.getUserId();
+        
         // Entity만 받아서 삭제 처리
         userBookRepository.delete(userBook);
+        
+        // 내 서재 캐시 무효화 (Write-Through 패턴)
+        invalidateMyShelfCache(userId);
     }
     
     /**
@@ -273,11 +335,16 @@ public class BookService {
      */
     public void updateBookCategory(UserShelfBook userBook, BookCategory category) {
         // 소유권 확인은 Controller에서 이미 완료된 것으로 가정
+        Long userId = userBook.getUserId();
+        
         // Entity만 받아서 카테고리 변경 처리
         userBook.setCategory(category);
         userBook.setUpdatedAt(LocalDateTime.now());
         
         userBookRepository.save(userBook);
+        
+        // 내 서재 캐시 무효화 (Write-Through 패턴)
+        invalidateMyShelfCache(userId);
     }
     
     /**
@@ -337,7 +404,12 @@ public class BookService {
         // 3. 업데이트 시간 갱신
         userBook.setUpdatedAt(LocalDateTime.now());
         
-        return userBookRepository.save(userBook);
+        UserShelfBook savedBook = userBookRepository.save(userBook);
+        
+        // 내 서재 캐시 무효화 (Write-Through 패턴)
+        invalidateMyShelfCache(userBook.getUserId());
+        
+        return savedBook;
     }
     
     

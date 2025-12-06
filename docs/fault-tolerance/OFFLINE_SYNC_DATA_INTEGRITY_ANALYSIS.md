@@ -84,6 +84,84 @@ if (!localMemo.serverId) {
 
 **낮음** - 데이터 무결성에는 문제가 없으나, 사용자 경험 저하 가능
 
+#### 로직 개선 방안: Optimistic UI 및 상태 관리 강화
+
+**개선 원칙**: Optimistic UI 개념을 확장하여 **데이터 상태 관리(State Management)**를 강화합니다. 로컬 메모의 상태(`syncStatus`)를 더 세분화하고, 동기화 중인 메모에 대한 수정을 허용하여 사용자 경험을 개선합니다.
+
+**문제 원인**: 로컬 데이터가 '동기화 중(syncing)' 상태인데, 사용자가 이 상태를 무시하고 **동기화가 완료된 후의 상태(Synced)에나 가능해야 하는 새로운 작업(수정/삭제)**을 시도하기 때문에 발생합니다.
+
+**개선 사항**:
+
+1. **syncStatus 세분화**
+   - 기존: `pending`, `syncing`, `synced`
+   - 개선: `pending`, `syncing_create`, `syncing_update`, `syncing_delete`, `synced`
+
+2. **동기화 중 수정 허용 로직**
+   ```javascript
+   // 개선된 수정 로직
+   async function updateMemo(localMemoId, updateData) {
+       const localMemo = await dbManager.getMemo(localMemoId);
+       
+       // 기존 로직: serverId가 없으면 차단
+       // if (!localMemo.serverId) {
+       //     throw new Error('아직 동기화되지 않은 메모는 수정할 수 없습니다.');
+       // }
+       
+       // 개선된 로직: syncStatus가 'syncing_create'일 경우 수정 허용
+       if (!localMemo.serverId && localMemo.syncStatus !== 'syncing_create') {
+           throw new Error('아직 동기화되지 않은 메모는 수정할 수 없습니다.');
+       }
+       
+       // 로컬 메모 업데이트
+       Object.assign(localMemo, updateData);
+       await dbManager.saveMemo(localMemo);
+       
+       // UPDATE 큐 항목 생성
+       const queueItem = await syncQueueManager.enqueue({
+           type: 'UPDATE',
+           localMemoId: localMemo.localId,
+           serverMemoId: localMemo.serverId, // null일 수 있음
+           originalCreateQueueId: localMemo.syncStatus === 'syncing_create' 
+               ? localMemo.syncQueueId 
+               : null, // 원본 CREATE 항목 ID 연결
+           data: updateData
+       });
+       
+       // syncQueueId 업데이트
+       localMemo.syncQueueId = queueItem.id;
+       await dbManager.saveMemo(localMemo);
+   }
+   ```
+
+3. **서버 ID 할당 시 연쇄 업데이트**
+   ```javascript
+   // CREATE 동기화 완료 시
+   async function onCreateSyncComplete(localMemoId, serverId) {
+       const localMemo = await dbManager.getMemo(localMemoId);
+       
+       // serverId 설정
+       localMemo.serverId = serverId;
+       localMemo.syncStatus = 'synced';
+       await dbManager.saveMemo(localMemo);
+       
+       // 해당 serverId를 찾는 모든 UPDATE/DELETE 큐 항목의 serverId 업데이트
+       // (원본 CREATE 항목 ID를 참조하는 모든 항목)
+       const relatedQueueItems = await syncQueueManager.findByOriginalCreateQueueId(
+           localMemo.syncQueueId
+       );
+       
+       for (const queueItem of relatedQueueItems) {
+           queueItem.serverMemoId = serverId;
+           await syncQueueManager.updateQueueItem(queueItem);
+       }
+   }
+   ```
+
+**개선 효과**:
+- ✅ 사용자는 동기화 완료를 기다릴 필요 없이 즉시 수정 가능
+- ✅ 서버 ID 할당을 서버 동기화 완료 시점으로 미루어, 서버에 ID가 할당되자마자 UPDATE가 순차적으로 실행될 수 있도록 준비
+- ✅ 순서 보장: CREATE → UPDATE 순서가 자동으로 보장됨
+
 ---
 
 ### 시나리오 2: 메모 수정 → 동기화 중 삭제
@@ -151,6 +229,102 @@ await dbManager.saveMemo(localMemo);
 
 **낮음** - 최종적으로는 의도대로 삭제되지만, 중간에 의도하지 않은 수정이 반영됨
 
+#### 로직 개선 방안: 강제 순차 처리 및 Optimistic Deletion
+
+**개선 원칙**: UPDATE가 처리 중인데 DELETE가 추가되는 경우, DELETE 작업을 강제로 순차 처리하고 대기 로직을 추가합니다. 사용자의 최종 의도(삭제)가 중간 단계(수정)보다 우선순위를 갖지만, 순차적 멱등성 보장을 위해 이전 작업이 끝날 때까지 DELETE 작업을 Service Worker 내부에서 대기시킵니다.
+
+**문제 원인**: UPDATE가 처리 중인데 DELETE가 추가되어, 원치 않은 수정이 먼저 반영되기 때문에 발생합니다. 현재 로직은 순차 처리(UPDATE 완료 → DELETE 시작)로 되어 있어 중간에 의도하지 않은 수정이 서버에 반영됩니다.
+
+**개선 사항**:
+
+1. **DELETE 시도 시 대기 상태 설정**
+   ```javascript
+   // 개선된 삭제 로직
+   async function deleteMemo(localMemoId) {
+       const localMemo = await dbManager.getMemo(localMemoId);
+       
+       // syncStatus가 'syncing'이면 DELETE 큐 항목을 'waiting' 상태로 추가
+       if (localMemo.syncStatus === 'syncing' || localMemo.syncStatus === 'syncing_update') {
+           const queueItem = await syncQueueManager.enqueue({
+               type: 'DELETE',
+               localMemoId: localMemo.localId,
+               serverMemoId: localMemo.serverId,
+               status: 'waiting', // 대기 상태
+               originalQueueId: localMemo.syncQueueId, // 원본 항목 ID 참조
+               data: { id: localMemo.serverId }
+           });
+           
+           // 로컬 메모를 '삭제 예정' 상태로 표시 (Optimistic Deletion)
+           localMemo.syncStatus = 'deleting_pending';
+           localMemo.syncQueueId = queueItem.id;
+           await dbManager.saveMemo(localMemo);
+           
+           // UI에서 즉시 숨김 (낙관적 삭제)
+           removeMemoFromUI(localMemoId);
+           
+           return; // 즉시 반환 (사용자 경험 개선)
+       }
+       
+       // 일반적인 삭제 로직 (syncing 상태가 아닐 때)
+       // ...
+   }
+   ```
+
+2. **Service Worker: 대기 로직 추가**
+   ```javascript
+   // Service Worker: 큐 항목 처리 로직
+   async function processSyncQueue() {
+       const queueItems = await syncQueueManager.getPendingItems();
+       
+       for (const queueItem of queueItems) {
+           // 'waiting' 상태의 항목 처리
+           if (queueItem.status === 'waiting') {
+               // 원본 항목이 'synced' 상태가 될 때까지 대기
+               const originalItem = await syncQueueManager.getQueueItem(
+                   queueItem.originalQueueId
+               );
+               
+               if (originalItem.status !== 'synced') {
+                   // 아직 원본 항목이 처리 중이면 다음 항목으로
+                   continue;
+               }
+               
+               // 원본 항목이 완료되었으면 'pending'으로 변경하고 실행
+               queueItem.status = 'pending';
+               await syncQueueManager.updateQueueItem(queueItem);
+           }
+           
+           // 일반 처리 로직
+           if (queueItem.status === 'pending') {
+               await processQueueItem(queueItem);
+           }
+       }
+   }
+   ```
+
+3. **Optimistic Deletion: 즉시 UI에서 숨김**
+   ```javascript
+   // DELETE 시도 즉시 로컬 메모를 '삭제 예정' 상태로 표시
+   function removeMemoFromUI(localMemoId) {
+       // UI에서 즉시 메모 제거 (낙관적 삭제)
+       const memoElement = document.querySelector(`[data-memo-id="${localMemoId}"]`);
+       if (memoElement) {
+           memoElement.style.display = 'none';
+           // 또는 DOM에서 완전히 제거
+           memoElement.remove();
+       }
+       
+       // 상태 업데이트
+       updateMemoListState();
+   }
+   ```
+
+**개선 효과**:
+- ✅ 사용자의 최종 의도(삭제)가 중간 단계(수정)보다 우선순위를 가짐
+- ✅ 순차적 멱등성 보장: 이전 작업이 끝날 때까지 DELETE 작업을 Service Worker 내부에서 대기
+- ✅ Optimistic Deletion: DELETE 시도 즉시 로컬 메모를 '삭제 예정' 상태로 표시하고 UI에서 즉시 숨김
+- ✅ 사용자 만족도 향상: 사용자가 '삭제' 버튼을 눌렀으면, 동기화 완료 여부와 관계없이 즉시 삭제된 것처럼 보임
+
 ---
 
 ### 시나리오 3: 메모 수정 → 삭제 → 동기화 순서 문제
@@ -206,6 +380,32 @@ pendingQueueItems.sort((a, b) => {
 
 **없음** - 문서 로직상 문제 없음
 
+#### 로직 개선 방안: 문제 없음, 개선 불필요 ✅
+
+**현재 상태**: 시나리오 3은 현재 로직으로도 정상적으로 동작하며, 추가 개선이 필요하지 않습니다.
+
+**이유**:
+
+1. **데이터 무결성**: 문제 없음
+   - 메모 삭제 시 기존 UPDATE 항목이 제거되므로, 서버에 의도하지 않은 수정이 반영되지 않습니다.
+   - DELETE 항목만 동기화되므로 최종 상태가 사용자 의도와 일치합니다.
+
+2. **중복 데이터**: 문제 없음
+   - UPDATE 항목이 제거되고 DELETE 항목만 남으므로 중복 작업이 발생하지 않습니다.
+
+3. **동기화 순서**: 문제 없음
+   - `createdAt` 기준 정렬로 순서가 보장되며, DELETE 항목만 존재하므로 순서 문제가 없습니다.
+
+4. **사용자 UI 화면**: 문제 없음
+   - 사용자가 삭제를 선택하면 UPDATE 항목이 제거되고 DELETE 항목만 추가되므로, UI에서도 삭제된 상태로 표시됩니다.
+
+**현재 로직의 적절성**:
+- 메모 삭제 시 기존 동기화 큐 항목(UPDATE)을 제거하는 로직이 올바르게 작동합니다.
+- 사용자의 최종 의도(삭제)가 정확히 반영됩니다.
+- 추가적인 상태 관리나 대기 로직이 필요하지 않습니다.
+
+**결론**: 시나리오 3은 **문제 없음, 개선 불필요** ✅
+
 ---
 
 ### 시나리오 4: 동기화 중 네트워크 재차단
@@ -249,20 +449,20 @@ pendingQueueItems.sort((a, b) => {
 
 | 작업 타입 | HTTP 메서드 | 서버 구현 | 멱등성 보장 여부 | 재시도 시 영향 |
 |----------|------------|----------|----------------|--------------|
-| **메모 생성** | POST | `memoRepository.save(memo)` | ❌ **보장하지 않음** | ⚠️ 중복 메모 생성 가능 |
+| **메모 생성** | POST | `memoRepository.save(memo)` | ✅ **보장함** (수정 완료) | ✅ 문제 없음 |
 | **메모 수정** | PUT | `memoRepository.save(existingMemo)` | ✅ **보장함** | ✅ 문제 없음 |
 | **메모 삭제** | DELETE | `memoRepository.delete(memo)` | ✅ **보장함** (수정 완료) | ✅ 문제 없음 |
 
 **상세 분석**:
 
-1. **POST /api/v1/memos (메모 생성)**
+1. **POST /api/v1/memos (메모 생성)** ✅ **수정 완료**
    - 구현: `memoRepository.save(memo)` - 새로운 엔티티 저장
    - ID 생성: `@GeneratedValue(strategy = GenerationType.IDENTITY)` - 서버에서 자동 생성
-   - 멱등성: ❌ 보장하지 않음
-   - 재시도 시: 동일한 요청을 여러 번 보내면 여러 개의 메모가 생성됨
-   - 중복 방지 로직: 없음
+   - 멱등성: ✅ **보장함** (수정 완료)
+   - 재시도 시: 동일한 `Idempotency-Key`로 재요청 시 캐시된 응답 반환 (중복 생성 방지)
+   - **수정 내용**: 멱등성 키(Idempotency Key) 활용하여 중복 요청 방지
    
-   **멱등성 보장 개선 방안: 멱등성 키(Idempotency Key) 활용**
+   **멱등성 보장 개선 방안: 멱등성 키(Idempotency Key) 활용** ✅ **구현 완료**
    
    **원칙**:
    - 클라이언트가 멱등성 키를 생성하여 `Idempotency-Key` 헤더에 담아 전송
@@ -648,22 +848,23 @@ pendingQueueItems.sort((a, b) => {
 **작업 타입별 영향**:
 
 - ✅ **메모 수정 (UPDATE)**: 멱등성이 보장되므로 재시도 시 문제 없음
-- ❌ **메모 생성 (CREATE)**: 재시도 시 중복 메모 생성 가능
+- ✅ **메모 생성 (CREATE)**: 멱등성이 보장되므로 재시도 시 문제 없음 (수정 완료)
 - ✅ **메모 삭제 (DELETE)**: 멱등성이 보장되므로 재시도 시 문제 없음 (수정 완료)
 
 **전체적인 영향**:
-- ⚠️ **데이터 무결성**: CREATE에서만 문제 발생 가능 (DELETE는 수정 완료)
-- ⚠️ **중복 데이터**: CREATE 재시도 시 중복 메모 생성
-- ✅ **재시도 로직**: Exponential Backoff로 재시도, DELETE는 멱등성 보장으로 문제 없음
+- ✅ **데이터 무결성**: CREATE와 DELETE 모두 멱등성 보장으로 문제 없음 (수정 완료)
+- ✅ **중복 데이터**: CREATE 재시도 시 멱등성 키로 중복 생성 방지 (수정 완료)
+- ✅ **재시도 로직**: Exponential Backoff로 재시도, CREATE와 DELETE 모두 멱등성 보장으로 문제 없음
 
 #### 해결 방안
 
 **서버 측 보완 필요**:
 
-1. **POST (메모 생성) 멱등성 보장**
-   - 요청 ID나 타임스탬프를 활용하여 중복 요청 감지
-   - 또는 클라이언트에서 생성한 고유 ID를 서버에서 검증하여 중복 생성 방지
-   - 예: `idempotency-key` 헤더 활용
+1. **POST (메모 생성) 멱등성 보장** ✅ **수정 완료**
+   - 멱등성 키(Idempotency Key) 활용하여 중복 요청 방지
+   - 클라이언트가 생성한 고유 ID를 `Idempotency-Key` 헤더로 전송
+   - 서버는 Redis에 키를 저장하고 동일한 키로 재요청 시 캐시된 응답 반환
+   - **수정 완료**: `IdempotencyKeyService` 구현 및 `MemoController`에 통합 완료
 
 2. **DELETE (메모 삭제) 멱등성 보장** ✅ **수정 완료**
    - 이미 삭제된 메모에 대해 예외를 던지지 않고 성공 응답 반환
@@ -772,6 +973,38 @@ localMemo.syncQueueId = queueItem.id; // DELETE 항목 ID로 변경
 #### 심각도
 
 **낮음** - 최종적으로는 의도대로 삭제되지만, 중간에 의도하지 않은 수정이 반영됨
+
+#### 로직 개선 방안: 강제 순차 처리 및 Optimistic Deletion
+
+**개선 원칙**: 시나리오 2와 동일한 개선 방안을 적용합니다. UPDATE가 처리 중인데 DELETE가 추가되는 경우, DELETE 작업을 강제로 순차 처리하고 대기 로직을 추가합니다.
+
+**문제 원인**: UPDATE가 처리 중인데 DELETE가 추가되어, 원치 않은 수정이 먼저 반영되기 때문에 발생합니다. 현재 로직은 순차 처리(UPDATE 완료 → DELETE 시작)로 되어 있어 중간에 의도하지 않은 수정이 서버에 반영됩니다.
+
+**개선 사항**:
+
+시나리오 2와 동일한 개선 방안을 적용합니다:
+
+1. **DELETE 시도 시 대기 상태 설정**
+   - `syncStatus`가 `syncing` 또는 `syncing_update`일 경우 DELETE 큐 항목을 `waiting` 상태로 추가
+   - 원본 항목 ID(`originalQueueId`) 참조
+   - 로컬 메모를 `deleting_pending` 상태로 표시
+   - UI에서 즉시 숨김 (Optimistic Deletion)
+
+2. **Service Worker: 대기 로직 추가**
+   - `waiting` 상태의 항목은 원본 항목이 `synced` 상태가 될 때까지 대기
+   - 원본 항목 완료 후 `pending`으로 변경하고 실행
+
+3. **Optimistic Deletion: 즉시 UI에서 숨김**
+   - DELETE 시도 즉시 로컬 메모를 '삭제 예정' 상태로 표시
+   - UI에서 즉시 메모 제거 (낙관적 삭제)
+
+**개선 효과**:
+- ✅ 사용자의 최종 의도(삭제)가 중간 단계(수정)보다 우선순위를 가짐
+- ✅ 순차적 멱등성 보장: 이전 작업이 끝날 때까지 DELETE 작업을 Service Worker 내부에서 대기
+- ✅ Optimistic Deletion: DELETE 시도 즉시 로컬 메모를 '삭제 예정' 상태로 표시하고 UI에서 즉시 숨김
+- ✅ 사용자 만족도 향상: 사용자가 '삭제' 버튼을 눌렀으면, 동기화 완료 여부와 관계없이 즉시 삭제된 것처럼 보임
+
+> **참고**: 시나리오 2와 시나리오 5는 동일한 문제 패턴을 가지고 있으므로, 동일한 개선 방안을 적용합니다.
 
 ---
 
@@ -882,6 +1115,100 @@ mergeMemos 결과:
 
 **중간** - 동일한 메모가 중복으로 표시되어 사용자에게 혼란을 줄 수 있음
 
+#### 로직 개선 방안: 동기화 대기 중인 메모 우선 표시 (Optimistic UI)
+
+**개선 원칙**: 시나리오 1, 2, 5와 마찬가지로, 시나리오 6 또한 **사용자 경험(UX) 최적화와 데이터 무결성(Integrity) 사이의 균형**을 맞추는 것이 핵심입니다. 로컬에 동기화 대기 중인(Pending) 상태의 메모가 존재한다면, 이는 곧 사용자의 가장 최근 의도이므로 서버의 낡은 데이터는 무시하고 로컬 데이터만 표시해야 합니다.
+
+**문제 원인**: `mergeMemos()` 로직이 동기화 대기 중인 로컬 메모(`syncStatus: 'pending'`, `serverId: 123`)와 서버 메모(`id: 123`)를 모두 표시하여 중복 표시가 발생합니다. 시나리오 1, 2, 5에서 문제가 동기화 순서와 중간 상태 제어였다면, 시나리오 6은 **UI 표시 시점의 데이터 선택 문제**입니다.
+
+**개선 사항**:
+
+1. **동기화 대기 중인 메모 우선 표시**
+   - 로컬 메모의 `serverId`가 존재하고 `syncStatus`가 `pending`, `syncing`, `waiting` 중 하나라면, 해당 메모는 최소한 서버에 한 번 생성된 적이 있다는 뜻입니다.
+   - 로컬 메모를 우선 표시하고 서버 메모를 **'낡은 데이터'**로 간주하여 무시함으로써 일관성을 확보합니다.
+   - 서버 메모는 `serverMemoMap`에서 **제거(Delete)**하여 중복 표시를 방지합니다.
+
+2. **확장된 동기화 상태 관리 지원**
+   - 시나리오 1, 2, 5의 해결책인 **'확장된 동기화 상태 관리'**는 시나리오 6의 문제를 근본적으로 지원합니다.
+   - 시나리오 1, 2, 5 해결책: 동기화가 끝나지 않은 메모의 상태를 `syncing`, `syncing_create`, `syncing_update`, `waiting` 등으로 명확히 관리하고, DELETE와 같은 파이널 액션은 이전 작업이 끝날 때까지 대기시켰습니다.
+   - 시나리오 6 적용: `mergeMemos`는 이 상태(`pending`, `syncing`, `syncing_create`, `syncing_update`, `waiting`)에 관계없이 로컬 메모의 `serverId`가 존재한다면, 로컬 메모를 우선 표시하고 서버 메모를 무시합니다.
+
+3. **개선된 mergeMemos 로직**
+   ```javascript
+   mergeMemos(localMemos, serverMemos) {
+       const serverMemoMap = new Map();
+       serverMemos.forEach(memo => {
+           serverMemoMap.set(memo.id, memo);
+       });
+       
+       const result = [];
+       const processedServerIds = new Set(); // 처리된 서버 ID 추적
+       
+       localMemos.forEach(localMemo => {
+           if (localMemo.syncStatus === 'synced' && localMemo.serverId) {
+               // 동기화 완료된 메모: 서버 메모로 대체
+               const serverMemo = serverMemoMap.get(localMemo.serverId);
+               if (serverMemo) {
+                   result.push(serverMemo);
+                   processedServerIds.add(localMemo.serverId);
+                   serverMemoMap.delete(localMemo.serverId);
+               } else {
+                   result.push(this.mapLocalMemoToResponse(localMemo));
+               }
+           } else if (localMemo.serverId) {
+               // 동기화 대기 중인 메모 (수정/삭제 대기)
+               // syncStatus: 'pending', 'syncing', 'syncing_create', 'syncing_update', 'waiting' 등
+               // 서버 메모는 제외하고 로컬 메모만 표시 (낡은 데이터 무시)
+               result.push(this.mapLocalMemoToResponse(localMemo));
+               processedServerIds.add(localMemo.serverId);
+               serverMemoMap.delete(localMemo.serverId); // 중요: 서버 메모 제거하여 중복 방지
+           } else {
+               // 아직 동기화되지 않은 메모 (생성 대기)
+               // serverId가 null이므로 서버 메모와 매칭 불가
+               result.push(this.mapLocalMemoToResponse(localMemo));
+           }
+       });
+       
+       // 서버에만 있는 메모 추가 (처리되지 않은 메모만)
+       serverMemoMap.forEach(memo => {
+           if (!processedServerIds.has(memo.id)) {
+               result.push(memo);
+           }
+       });
+       
+       return result.sort((a, b) => {
+           const timeA = new Date(a.memoStartTime || a.createdAt);
+           const timeB = new Date(b.memoStartTime || b.createdAt);
+           return timeA - timeB;
+       });
+   }
+   ```
+
+**개선 효과 (Efficiency & Simplicity)**:
+
+1. **사용자 의도 존중 (Optimistic UI)**
+   - 사용자가 오프라인에서 수정한 내용은 서버로 전송되기 전이라도, 사용자에게는 가장 최신 버전으로 보여야 합니다.
+   - 로컬 메모를 표시함으로써 이 원칙을 지킬 수 있습니다.
+   - 사용자가 수정한 최신 내용을 즉시 확인할 수 있어 사용자 경험이 향상됩니다.
+
+2. **구현 단순성**
+   - 서버에서 가져온 낡은 데이터를 로컬 메모의 최신 데이터로 덮어쓰거나 복잡하게 병합할 필요가 없습니다.
+   - 단순히 `serverId`가 일치하는 서버 메모를 `serverMemoMap`에서 **제거(Delete)**하여 중복 표시를 방지할 수 있습니다.
+   - 로직이 단순하고 명확하여 유지보수가 용이합니다.
+
+3. **데이터 무결성 유지**
+   - 서버 메모는 `serverId`를 포함하므로, 로컬 메모와 서버 메모를 `serverId`를 키로 하여 맵에서 매칭시키면 중복 문제를 깔끔하게 해결할 수 있습니다.
+   - `processedServerIds` Set을 사용하여 이미 처리된 서버 ID를 추적하여 중복 방지를 보장합니다.
+
+4. **확장된 동기화 상태 관리와의 일관성**
+   - 시나리오 1, 2, 5에서 도입한 확장된 동기화 상태 관리(`syncing_create`, `syncing_update`, `waiting` 등)와 일관된 방식으로 처리됩니다.
+   - 모든 동기화 대기 상태(`pending`, `syncing`, `syncing_create`, `syncing_update`, `waiting`)에 대해 동일한 원칙을 적용합니다.
+
+**핵심 원칙**:
+- **로컬 메모의 `serverId`가 존재하면 → 로컬 메모 우선 표시, 서버 메모 무시**
+- **로컬 메모의 `serverId`가 없으면 → 로컬 메모 표시 (서버 메모와 매칭 불가)**
+- **서버에만 있는 메모 → 표시 (로컬에 없는 새로운 메모)**
+
 ---
 
 ## 종합 분석
@@ -893,7 +1220,7 @@ mergeMemos 결과:
 | 시나리오 1 | 사용자 경험 저하 | 낮음 | 낮음 | 정상 |
 | 시나리오 2 | 작업 순서 문제 | 낮음 | 중간 | 정상 (의도대로 삭제) |
 | 시나리오 3 | 순서 문제 | 없음 | 없음 | 정상 |
-| 시나리오 4 | 중복 생성/삭제 예외 | **중간** | 중간 | **서버 보완 필요** |
+| 시나리오 4 | 중복 생성/삭제 예외 | **중간** | 중간 | ✅ **수정 완료** |
 | 시나리오 5 | 작업 순서 문제 | 낮음 | 중간 | 정상 (의도대로 삭제) |
 | **시나리오 6** | **중복 표시** | **중간** | **높음** | **문제 있음** |
 

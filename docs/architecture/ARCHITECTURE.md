@@ -177,6 +177,12 @@ src/main/resources/                   # 리소스 파일 (위치 변경 없음)
   - 예: `findUser()`, `findById()`, `findAll()`
 - **`save...`**: 무언가를 저장하는 함수
   - 예: `saveUser()`, `saveData()`, `saveChanges()`
+- **`process...`**: 시스템 레벨의 비동기 작업 오케스트레이션을 처리하는 함수
+  - 큐/목록에서 항목을 가져와, 유효성을 확인하고, 복구 로직을 실행하는 일련의 과정을 처리
+  - 예: `processRecoveryQueue()`, `processPendingTasks()`, `processEventQueue()`
+- **`handle...`**: 이벤트 드리븐 아키텍처나 예외 처리 로직에서 특정 상황(이벤트)에 대처하는 함수
+  - 실패 이벤트에 대한 대응 및 로깅(기록) 책임을 가짐
+  - 예: `handleRecoveryFailure()`, `handleException()`, `handleErrorEvent()`
 
 이러한 접두사를 사용하면 코드의 가독성이 향상되고, 함수의 역할을 쉽게 파악할 수 있습니다.
 
@@ -241,6 +247,61 @@ showPermissionStatus(hasPermission);  // 별도 함수로 분리
 ```
 
 이러한 단일 책임 원칙을 따르면 코드의 재사용성, 테스트 용이성, 유지보수성이 향상됩니다.
+
+### 비기능 요구사항(NFR) 관련 예외 사항
+
+**중요**: 비기능 요구사항(Fault Tolerance, 장애 허용 등)과 관련된 코드는 일반적인 CRUD 비즈니스 로직과는 성격이 다릅니다. 이들은 시스템의 안정성, 일관성, 회복탄력성이라는 **단일 목표를 달성하기 위해 여러 세부 단계를 오케스트레이션(Orchestration)** 해야 합니다.
+
+**예외 원칙**: 비기능 품질 관련 코드는 시스템의 회복탄력성이라는 단일 목표를 달성하기 위한 **응집된 로직**으로 간주하며, 여러 단계를 하나의 책임으로 묶는 것이 적절합니다.
+
+**이유:**
+
+1. **높은 응집도 (High Cohesion)**
+   - 복구 실패 처리(`handleRecoveryFailure()`)는 복구 실패 시 일어나는 모든 작업(재시도 관리, 로깅, 알림, 재큐잉)을 묶어두는 것이 논리적으로 가장 응집도가 높습니다.
+   - 이 단계들을 분리하면, 실패 처리라는 하나의 시나리오를 이해하기 위해 여러 함수를 넘나들어야 하는 문제가 발생합니다.
+
+2. **가독성 및 흐름 유지**
+   - 오케스트레이션 로직의 핵심은 **"흐름"**입니다.
+   - `processRecoveryEvent()` 안에 로깅을 포함함으로써, 이벤트 처리의 성공/실패 여부가 한눈에 보입니다.
+   - 흐름을 유지하는 것이 각 단계를 분리하는 것보다 더 중요합니다.
+
+3. **변경의 용이성 (Maintainability)**
+   - 실패 처리 정책이 바뀐다면 → `handleRecoveryFailure()`만 수정
+   - 로깅 방식이 바뀐다면 → `processRecoveryEvent()` 내의 로깅 로직만 수정
+   - 책임이 명확하게 정의되어 있기 때문에, 각 책임 범위 내에서의 변경은 다른 함수에 영향을 미치지 않습니다.
+
+**예시:**
+```java
+// ✅ 올바른 예: 비기능 요구사항 관련 오케스트레이션
+private void handleRecoveryFailure(CompensationFailureEvent event, Exception e) {
+    // 재시도 횟수 관리, 로깅, 알림, 재큐잉을 하나의 함수로 묶음
+    int retryCount = event.incrementRetryCount();
+    log.warn("복구 재시도 실패: entityId={}, retryCount={}", 
+            event.getEntityId(), retryCount);
+    
+    if (retryCount >= MAX_RETRY_COUNT) {
+        alertService.sendCriticalAlert("복구 작업 실패", ...);
+        recoveryQueueService.markAsFailed(event);
+    } else {
+        recoveryQueueService.requeue(event);
+    }
+}
+
+// ✅ 올바른 예: Dual Write 오케스트레이션
+public <T> T writeWithDualWrite(...) {
+    // Primary 쓰기, Secondary 쓰기, 보상 트랜잭션을 하나의 함수로 묶음
+    T primaryResult = writeToPrimary(...);
+    try {
+        writeToSecondary(...);
+        return primaryResult;
+    } catch (Exception e) {
+        executeCompensation(primaryResult);
+        throw e;
+    }
+}
+```
+
+**결론**: 비기능 요구사항 관련 코드에서는 **"여러 단계를 하나의 책임으로 묶는 것이 적절하다"**는 원칙을 유지 및 준수해야 합니다.
 
 ### 파일 명명 규칙
 
@@ -408,6 +469,105 @@ books (1) ← (N) user_books
 - **dbms 패키지**: DBMS 관련 및 Server ↔ DBMS 경계 관리
 - **이유**: 경계 중심 구조로 의존성 방향 명확화, 확장성 향상
 
+### 6. MySQL 이중화 아키텍처 (Fault Tolerance)
+
+#### 개요
+
+MySQL Master-Master 이중화를 통한 데이터베이스 장애 허용(Fault Tolerance) 아키텍처입니다. MySQL Replication을 사용할 수 없는 환경에서 애플리케이션 레벨에서 Custom Dual Write 및 Read Failover를 구현합니다.
+
+#### 패키지 구조
+
+```
+src/main/java/com/readingtracker/server/
+├── config/                    # 설정 클래스
+│   └── DualMasterDataSourceConfig.java
+├── service/
+│   ├── recovery/              # 복구 관련 서비스
+│   │   ├── CompensationRecoveryWorker.java
+│   │   ├── RecoveryQueueService.java
+│   │   └── CompensationFailureEvent.java
+│   ├── write/                 # 쓰기 서비스
+│   │   └── DualMasterWriteService.java
+│   └── read/                  # 읽기 서비스
+│       └── DualMasterReadService.java
+```
+
+#### 데이터 소스 및 트랜잭션 관리자 설정
+
+**위치**: `server.config.DualMasterDataSourceConfig`
+
+Primary와 Secondary 각각에 대해 독립적인 `DataSource`와 `PlatformTransactionManager`를 정의합니다.
+
+**설정 구조**:
+- `primaryDataSource`: Primary DB 연결
+- `secondaryDataSource`: Secondary DB 연결
+- `primaryTransactionManager`: Primary DB 트랜잭션 관리
+- `secondaryTransactionManager`: Secondary DB 트랜잭션 관리
+- `primaryJdbcTemplate`: Primary DB JdbcTemplate
+- `secondaryJdbcTemplate`: Secondary DB JdbcTemplate
+
+#### Custom Dual Write 전략
+
+**위치**: `server.service.write.DualMasterWriteService`
+
+**원칙**:
+1. **Primary 우선**: 모든 쓰기는 Primary에 먼저 실행
+2. **Secondary 동기화**: Primary 성공 시 Secondary에 동일 작업 실행
+3. **보상 트랜잭션**: Secondary 실패 시 Primary에 보상 트랜잭션 실행
+4. **일관성 보장**: Primary 실패 시 Secondary로의 쓰기 Failover는 허용하지 않음
+
+**흐름**:
+```
+Primary에 쓰기 시도
+    ↓
+성공
+    ↓
+Secondary에 쓰기 시도
+    ├─ 성공 → Commit (양쪽 모두 성공)
+    └─ 실패 → Primary에 보상 트랜잭션 실행 (DELETE)
+              → Exception 발생 (사용자에게 실패 알림)
+```
+
+#### Read Failover 전략
+
+**위치**: `server.service.read.DualMasterReadService`
+
+**원칙**:
+- Primary에서 읽기 시도
+- Primary 실패 시 Secondary로 자동 Failover
+- 두 DB 모두 실패 시에만 Exception 발생
+
+**흐름**:
+```
+Primary에서 읽기 시도
+    ├─ 성공 → 반환
+    └─ 실패 → Secondary에서 읽기 시도
+              ├─ 성공 → 반환
+              └─ 실패 → Exception 발생
+```
+
+#### 보상 트랜잭션 실패 처리
+
+**위치**: `server.service.recovery.CompensationRecoveryWorker`
+
+**전략**: 비동기 복구 메커니즘
+- 보상 트랜잭션 실패 시 CRITICAL 로그 기록 및 경고 발생
+- 복구 큐(DLQ)에 이벤트 발행
+- 백그라운드 복구 작업자가 주기적으로 재시도
+- 최대 재시도 횟수 초과 시 수동 개입 알림
+
+**패키지 구조**: `server.service.recovery` 패키지에 복구 관련 서비스 분리
+- 실패 격리 (Failure Isolation)
+- 독립적인 확장 (Scalability)
+
+#### 아키텍처 원칙
+
+1. **독립적인 DataSource**: Primary와 Secondary는 완전히 독립적인 연결 풀 사용
+2. **명확한 책임 분리**: Read, Write, Recovery 서비스를 별도 패키지로 분리
+3. **비기능 요구사항 예외**: 오케스트레이션 로직은 여러 단계를 하나의 책임으로 묶음 (자세한 내용은 "비기능 요구사항(NFR) 관련 예외 사항" 참조)
+
+**참고**: 상세 구현 가이드는 [FAULT_TOLERANCE_IMPLEMENTATION_ROADMAP.md](../fault-tolerance/FAULT_TOLERANCE_IMPLEMENTATION_ROADMAP.md) 참조
+
 ## 개발 가이드라인
 
 ### 엔티티 클래스 (Server ↔ DBMS 경계)
@@ -445,6 +605,59 @@ books (1) ← (N) user_books
 3. **마이그레이션**: 기존 마이그레이션 파일은 수정하지 않음
 4. **DTO 분리**: 경계별 DTO 혼용 금지 (ClientServerDTO와 ServerDbmsDTO 혼용 금지)
 5. **패키지 명명**: 모든 패키지명은 소문자 한 단어로만 구성
+
+## 아키텍처 예외 처리 가이드라인
+
+### 일반 원칙
+
+**1순위 규칙**: 모든 개발 작업은 아키텍처 문서를 반드시 준수해야 합니다.
+- `분산2_프로젝트/docs/architecture/` 하위 문서들
+- `분산2_프로젝트_프론트/docs/architecture/` 하위 문서들
+
+### 예외 상황 판단 기준
+
+아키텍처 문서를 준수하는 것보다 더 적합한 아키텍처가 필요한 충돌 상황이 발생할 수 있습니다. 이 경우 다음 기준을 고려하여 판단합니다:
+
+#### 1. 기능적 독립성
+- **기준**: 해당 기능이 다른 기능들과 성격이 다르고, 독립된 도메인(책임)으로 간주되는가?
+- **예시**: 메타 정보(Metadata) 경로는 리소스 경로와는 성격이 다르므로, 자체적인 논리 구조를 가질 수 있음
+  - 리소스 경로: `/api/v1/memos`, `/api/v1/user/books` (CRUD 대상)
+  - 메타 정보 경로: `/api/v1/health/{target}` (시스템 상태 확인)
+
+#### 2. 확장성
+- **기준**: 향후 확장 시 구조가 더 명확하고 간결해지는가?
+- **예시**: 헬스체크 엔드포인트가 여러 개 추가될 경우, 클래스 레벨에서 경로를 지정하면 메서드 레벨 경로가 간결해짐
+  - `/api/v1/health/aladin`, `/api/v1/health/server`, `/api/v1/health/database` 등
+
+#### 3. RESTful 아키텍처 원칙
+- **기준**: RESTful 설계 원칙에 더 부합하는가?
+- **예시**: 리소스 중심 설계에서 특정 경로가 하나의 리소스 그룹으로 논리적으로 그룹화되는가?
+
+#### 4. 유지보수성
+- **기준**: 경로만으로 목적과 대상을 파악할 수 있는가?
+- **예시**: `/api/v1/health/aladin` 경로만 보고도 목적(Health Check)과 대상(Aladin)을 한눈에 파악 가능
+
+### 예외 처리 절차
+
+아키텍처 문서와 충돌하거나 더 적합한 아키텍처가 필요한 경우:
+
+1. **충돌/예외 상황 식별**: 아키텍처 문서의 요구사항과 대안을 명확히 비교
+2. **판단 기준 적용**: 위의 4가지 기준을 고려하여 분석
+3. **사용자 보고**: 충돌 상황, 비교 분석, 권장 방법을 사용자에게 제시
+4. **사용자 결정 대기**: 사용자의 최종 결정에 따라 진행
+
+### 예시 사례
+
+**HealthController의 @RequestMapping 구조**
+
+- **아키텍처 문서 요구사항**: 다른 컨트롤러들과 일관된 패턴 (`@RequestMapping("/api/v1")` + 메서드 레벨 경로)
+- **예외 상황**: Health Check는 메타 정보 도메인으로, 리소스 경로와 다른 논리 구조 필요
+- **결정**: `@RequestMapping("/api/v1/health")` + `@GetMapping("/aladin")` 구조 채택
+- **이유**: 
+  - 기능적 독립성: Health Check는 독립된 도메인
+  - 확장성: 향후 `/health/server`, `/health/database` 추가 시 구조 명확
+  - RESTful 원칙: 메타 정보 경로는 리소스 경로와 성격이 다름
+  - 유지보수성: 경로만으로 목적과 대상 파악 가능
 
 ## 참고 자료
 

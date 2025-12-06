@@ -37,6 +37,34 @@ public class AladinApiService {
     }
     
     /**
+     * 알라딘 API 연결 테스트
+     * 가장 가벼운 요청으로 연결 가능 여부 확인
+     * @throws RuntimeException 연결 실패 시
+     */
+    public void testConnection() {
+        try {
+            // 가장 가벼운 요청: 최소한의 파라미터로 ItemSearch API 호출
+            String url = UriComponentsBuilder.fromHttpUrl(baseUrl + "/ItemSearch.aspx")
+                    .queryParam("ttbkey", apiKey)
+                    .queryParam("Query", "테스트")
+                    .queryParam("QueryType", "Title")
+                    .queryParam("SearchTarget", "Book")
+                    .queryParam("Start", 1)
+                    .queryParam("MaxResults", 1)
+                    .queryParam("Output", "JS")
+                    .queryParam("Version", "20131101")
+                    .build()
+                    .toUriString();
+            
+            // API 호출 (응답은 사용하지 않음, 연결 가능 여부만 확인)
+            restTemplate.getForEntity(url, Map.class);
+            
+        } catch (Exception e) {
+            throw new RuntimeException("알라딘 API 연결 실패: " + e.getMessage(), e);
+        }
+    }
+    
+    /**
      * 알라딘 API로 책 검색
      * 외부 API 통신만 담당하며, 외부 DTO(AladinBookResponseDTO)만 반환합니다.
      * 비즈니스 로직(검증/필터링)은 포함하지 않습니다.

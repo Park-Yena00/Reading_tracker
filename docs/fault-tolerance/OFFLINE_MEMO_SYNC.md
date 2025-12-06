@@ -233,7 +233,7 @@ async createMemo(memoData) {
 **핵심 원리:**
 - **`navigator.onLine` API**: 현재 브라우저의 온라인/오프라인 상태를 확인
 - **`online` / `offline` 이벤트**: 네트워크 상태 변경 시 자동으로 이벤트 발생
-- **헬스체크 (선택사항)**: 실제 서버 연결 가능 여부를 확인
+- **2단계 헬스체크**: 로컬 백엔드 서버 연결 가능 여부 + 외부 서비스(알라딘 API) 연결 가능 여부를 각각 확인
 
 **감지 메커니즘:**
 
@@ -252,6 +252,22 @@ window.addEventListener('offline', () => {
     console.log('네트워크가 끊어졌습니다!');
 });
 ```
+
+**⚠️ 중요: 2단계 헬스체크의 필요성**
+
+현재 `navigator.onLine`과 기본 헬스체크만으로는 다음 시나리오를 감지하지 못합니다:
+
+**문제 시나리오:**
+- 학교 Wi-Fi에 연결되어 있지만, 학교 방화벽이 알라딘 API 서버로의 외부 요청을 차단
+- `navigator.onLine`: `true` (로컬 네트워크 어댑터는 연결됨)
+- 기본 헬스체크(`/api/v1/health`): 성공 (로컬 백엔드 서버는 접근 가능)
+- **결과**: 프론트엔드는 "온라인 상태이며 동기화 및 검색 가능"하다고 판단
+- **실제**: 사용자가 도서 검색을 시도하면 백엔드 서버가 알라딘 API 연결에 실패하여 500 에러 반환 → 사용자 혼란 유발
+
+**해결 방안:**
+- **1단계**: 로컬 백엔드 서버 연결 확인 (`/api/v1/health`)
+- **2단계**: 외부 서비스(알라딘 API) 연결 확인 (`/api/v1/health/aladin`)
+- 두 단계 모두 성공해야 완전한 온라인 상태로 판단
 
 **작동 원리:**
 1. 브라우저가 시스템의 네트워크 어댑터 상태를 모니터링
@@ -392,49 +408,408 @@ Spring Boot Controller → Service → Repository → MySQL
 - `navigator.onLine`은 네트워크 어댑터 상태만 확인
 - 실제 서버 연결 가능 여부와 다를 수 있음
 - 예: Wi-Fi 연결되어 있지만 인터넷 접속 불가
+- **추가 문제**: 로컬 백엔드 서버는 접근 가능하지만, 외부 서비스(알라딘 API)는 접근 불가능한 경우를 감지하지 못함
 
 **해결 방법:**
 
-**서버 헬스체크를 통한 네트워크 감지 (권장)** ⭐
+**2단계 헬스체크를 통한 네트워크 감지 (권장)** ⭐
+
+**1단계: 백엔드 Heartbeat 엔드포인트 구현**
+
+백엔드 서버에 다음 엔드포인트를 추가합니다:
+
+**엔드포인트**: `GET /api/v1/health/aladin`
+
+**로직**:
+- 요청 시, 알라딘 API의 가장 가벼운 API(예: 카테고리 목록)에 실제 API 키를 사용하여 요청을 보냅니다.
+- 성공 시: `200 OK` 응답
+- 실패 시 (연결 불가, 401 인증 실패 등): `503 Service Unavailable` 응답
+
+**백엔드 구현 예시**:
+```java
+@RestController
+@RequestMapping("/api/v1/health")
+public class HealthController {
+    
+    @Autowired
+    private AladinApiService aladinApiService;
+    
+    /**
+     * 알라딘 API 연결 가능 여부 확인
+     * @return 200 OK (연결 가능) 또는 503 Service Unavailable (연결 불가)
+     */
+    @GetMapping("/aladin")
+    public ResponseEntity<Void> checkAladinHealth() {
+        try {
+            // 알라딘 API의 가장 가벼운 요청으로 연결 테스트
+            // 예: 카테고리 목록 조회 (TTBKey만 필요, 최소한의 데이터)
+            aladinApiService.testConnection();
+            return ResponseEntity.ok().build();
+        } catch (Exception e) {
+            // 연결 실패, 인증 실패, 타임아웃 등 모든 예외 처리
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).build();
+        }
+    }
+}
+```
+
+**2단계: 클라이언트 Heartbeat 로직 확장**
+
+`NetworkMonitor` 클래스를 수정하여 외부 서비스 상태까지 확인합니다:
+
 ```javascript
-// utils/network-monitor.js (개선된 버전)
+// utils/network-monitor.js (2단계 헬스체크 개선 버전)
+import { showToast } from './toast.js';
+import { offlineMemoService } from '../services/offline-memo-service.js';
+
 class NetworkMonitor {
+    constructor() {
+        this.isLocalServerReachable = false;
+        this.isExternalServiceReachable = false;
+    }
+    
     async onNetworkOnline() {
         // 1초 대기 (네트워크 안정화)
         await this.delay(1000);
         
-        // 2. 실제 서버 연결 가능 여부 확인 (헬스체크)
-        const isServerReachable = await this.checkServerHealth();
+        // 1단계: 로컬 백엔드 서버 연결 가능 여부 확인
+        this.isLocalServerReachable = await this.checkServerHealth();
         
-        if (isServerReachable) {
-            // 서버에 실제로 연결 가능 → 동기화 시작
-            await offlineMemoService.syncPendingMemos();
-        } else {
-            // 네트워크는 연결되었지만 서버 접근 불가
+        if (!this.isLocalServerReachable) {
+            // 로컬 서버 접근 불가
             console.warn('네트워크는 연결되었지만 서버에 접근할 수 없습니다.');
+            this.notifyNetworkStatus(false, false);
             // 재시도 예약
             setTimeout(() => this.onNetworkOnline(), 5000);
+            return;
+        }
+        
+        // 2단계: 외부 서비스(알라딘 API) 연결 가능 여부 확인
+        this.isExternalServiceReachable = await this.checkExternalServiceHealth();
+        
+        if (this.isExternalServiceReachable) {
+            // 모든 서비스 연결 가능 → 동기화 시작 및 도서 검색 활성화
+            this.notifyNetworkStatus(true, true);
+            // 동기화 완료 후 토스트 메시지 표시
+            await this.handleSyncSuccess();
+        } else {
+            // 로컬 서버는 접근 가능하지만 외부 서비스 접근 불가
+            // 동기화는 가능하지만 도서 검색은 제한됨
+            console.warn('외부 서비스에 접근할 수 없습니다. 검색 기능이 제한됩니다.');
+            this.notifyNetworkStatus(true, false);
+            // 외부 서비스 재시도 예약
+            setTimeout(() => this.checkExternalServiceHealth(), 5000);
+            // 동기화는 진행 (로컬 서버는 접근 가능하므로)
+            // 동기화 완료 후 토스트 메시지 표시 (외부 서비스 경고 포함)
+            await this.handleSyncSuccess(false);
         }
     }
     
     /**
-     * 서버 헬스체크 (실제 연결 가능 여부 확인)
+     * 1단계: 로컬 백엔드 서버 헬스체크
+     * @returns {Promise<boolean>} 서버 연결 가능 여부
      */
     async checkServerHealth() {
         try {
-            // 간단한 HEAD 요청으로 서버 응답 확인
             const response = await fetch('http://localhost:8080/api/v1/health', {
                 method: 'HEAD',
                 signal: AbortSignal.timeout(3000)  // 3초 타임아웃
             });
             return response.ok;
         } catch (error) {
-            console.error('서버 헬스체크 실패:', error);
+            console.error('로컬 서버 헬스체크 실패:', error);
             return false;
+        }
+    }
+    
+    /**
+     * 2단계: 외부 서비스(알라딘 API) 헬스체크
+     * @returns {Promise<boolean>} 외부 서비스 연결 가능 여부
+     */
+    async checkExternalServiceHealth() {
+        try {
+            const response = await fetch('http://localhost:8080/api/v1/health/aladin', {
+                method: 'GET',
+                signal: AbortSignal.timeout(5000)  // 5초 타임아웃 (외부 API이므로 더 긴 타임아웃)
+            });
+            
+            if (response.ok) {
+                // 200 OK: 알라딘 API 연결 가능
+                return true;
+            } else if (response.status === 503) {
+                // 503 Service Unavailable: 알라딘 API 연결 불가
+                return false;
+            } else {
+                // 기타 상태 코드
+                return false;
+            }
+        } catch (error) {
+            console.error('외부 서비스 헬스체크 실패:', error);
+            return false;
+        }
+    }
+    
+    /**
+     * 네트워크 상태를 다른 컴포넌트에 알림 (DOM 이벤트)
+     * @param {boolean} isLocalServerReachable 로컬 서버 연결 가능 여부
+     * @param {boolean} isExternalServiceReachable 외부 서비스 연결 가능 여부
+     */
+    notifyNetworkStatus(isLocalServerReachable, isExternalServiceReachable) {
+        // 커스텀 이벤트 발생
+        const event = new CustomEvent('networkStatusChanged', {
+            detail: {
+                isLocalServerReachable,
+                isExternalServiceReachable,
+                isFullyOnline: isLocalServerReachable && isExternalServiceReachable
+            }
+        });
+        window.dispatchEvent(event);
+    }
+    
+    /**
+     * 동기화 성공 처리 및 토스트 메시지 표시
+     * Heartbeat 성공 후, 모든 백그라운드 동기화 작업이 완료된 직후 호출됨
+     * @param {boolean} isExternalServiceAvailable 외부 서비스(알라딘 API) 사용 가능 여부 (기본값: true)
+     */
+    async handleSyncSuccess(isExternalServiceAvailable = true) {
+        try {
+            // 모든 백그라운드 동기화 작업 실행
+            // syncPendingMemos()는 { successCount: number, failedCount: number } 형태의 결과를 반환
+            const syncResult = await offlineMemoService.syncPendingMemos();
+            
+            // 동기화 완료 후 토스트 메시지 표시 (성공 또는 실패 응답을 받은 후)
+            if (syncResult && syncResult.successCount > 0) {
+                // 동기화 성공 메시지 (우측 하단에 토스트 표시)
+                showToast(`✅ ${syncResult.successCount}개의 메모 동기화 완료.`, 'success');
+            }
+            
+            // 외부 서비스 연결 불가 시 경고 메시지
+            if (!isExternalServiceAvailable) {
+                showToast('⚠️ 외부 서비스 연결 불가. 검색 제한됨.', 'warning');
+            }
+        } catch (error) {
+            console.error('동기화 실패:', error);
+            showToast('❌ 동기화 중 오류가 발생했습니다.', 'error');
         }
     }
 }
 ```
+
+**토스트 메시지 유틸리티 함수:**
+
+```javascript
+// utils/toast.js
+/**
+ * 토스트 메시지 표시 유틸리티 함수
+ * @param {string} message 표시할 메시지
+ * @param {string} type 메시지 타입 ('success', 'warning', 'error', 'info')
+ * @param {number} duration 표시 시간 (밀리초, 기본값: 3000)
+ */
+function showToast(message, type = 'info', duration = 3000) {
+    // 토스트 컨테이너가 없으면 생성
+    let toastContainer = document.getElementById('toast-container');
+    if (!toastContainer) {
+        toastContainer = document.createElement('div');
+        toastContainer.id = 'toast-container';
+        toastContainer.style.cssText = `
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            z-index: 10000;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        `;
+        document.body.appendChild(toastContainer);
+    }
+    
+    // 토스트 메시지 요소 생성
+    const toast = document.createElement('div');
+    toast.className = `toast toast-${type}`;
+    toast.style.cssText = `
+        background-color: ${getToastColor(type)};
+        color: white;
+        padding: 12px 20px;
+        border-radius: 8px;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        min-width: 250px;
+        max-width: 400px;
+        animation: slideIn 0.3s ease-out;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    `;
+    
+    toast.textContent = message;
+    
+    // 토스트 컨테이너에 추가
+    toastContainer.appendChild(toast);
+    
+    // 지정된 시간 후 자동 제거
+    setTimeout(() => {
+        toast.style.animation = 'slideOut 0.3s ease-out';
+        setTimeout(() => {
+            if (toast.parentNode) {
+                toast.parentNode.removeChild(toast);
+            }
+        }, 300);
+    }, duration);
+}
+
+/**
+ * 토스트 메시지 타입별 색상 반환
+ * @param {string} type 메시지 타입
+ * @returns {string} CSS 색상 값
+ */
+function getToastColor(type) {
+    const colors = {
+        success: '#4caf50',
+        warning: '#ff9800',
+        error: '#f44336',
+        info: '#2196f3'
+    };
+    return colors[type] || colors.info;
+}
+
+// CSS 애니메이션 추가 (한 번만 추가)
+if (!document.getElementById('toast-styles')) {
+    const style = document.createElement('style');
+    style.id = 'toast-styles';
+    style.textContent = `
+        @keyframes slideIn {
+            from {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+        @keyframes slideOut {
+            from {
+                transform: translateX(0);
+                opacity: 1;
+            }
+            to {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+        }
+    `;
+    document.head.appendChild(style);
+}
+
+export { showToast };
+```
+
+**컴포넌트에서 네트워크 상태 수신 및 UI 업데이트:**
+
+```javascript
+// components/BookSearchComponent.js
+import { showToast } from '../utils/toast.js';
+
+class BookSearchComponent {
+    constructor() {
+        // 네트워크 상태 변경 이벤트 리스너 등록
+        window.addEventListener('networkStatusChanged', (event) => {
+            const { isLocalServerReachable, isExternalServiceReachable, isFullyOnline } = event.detail;
+            
+            if (isFullyOnline) {
+                // 모든 서비스 연결 가능 → 도서 검색 활성화
+                this.enableBookSearch();
+                this.hideWarningMessage();
+            } else if (isLocalServerReachable && !isExternalServiceReachable) {
+                // 로컬 서버는 접근 가능하지만 외부 서비스 접근 불가
+                // → 도서 검색 비활성화 및 경고 메시지 표시
+                this.disableBookSearch();
+                this.showWarningMessage('외부 서비스에 접근할 수 없습니다. 검색 기능이 제한됩니다.');
+            } else {
+                // 로컬 서버도 접근 불가
+                this.disableBookSearch();
+                this.showWarningMessage('서버에 접근할 수 없습니다.');
+            }
+        });
+    }
+    
+    enableBookSearch() {
+        // 도서 검색 버튼 활성화
+        this.searchButton.disabled = false;
+    }
+    
+    disableBookSearch() {
+        // 도서 검색 버튼 비활성화
+        this.searchButton.disabled = true;
+    }
+    
+    showWarningMessage(message) {
+        // 경고 메시지 UI에 표시
+        this.warningMessageElement.textContent = message;
+        this.warningMessageElement.style.display = 'block';
+    }
+    
+    hideWarningMessage() {
+        // 경고 메시지 숨김
+        this.warningMessageElement.style.display = 'none';
+    }
+}
+```
+
+**동작 흐름:**
+
+```
+[네트워크 연결 감지]
+    ↓
+[1단계: 로컬 백엔드 서버 헬스체크]
+    ├─ 실패 → 재시도 예약, UI에 "서버 접근 불가" 메시지 표시
+    └─ 성공 ↓
+        [2단계: 외부 서비스(알라딘 API) 헬스체크]
+            ├─ 실패 → 
+            │   - UI에 "외부 서비스 접근 불가, 검색 기능 제한" 메시지 표시
+            │   - 도서 검색 버튼 비활성화
+            │   - 동기화는 진행 (로컬 서버는 접근 가능)
+            │   - 외부 서비스 재시도 예약
+            │   - handleSyncSuccess(false) 호출
+            │       ↓
+            │   [동기화 완료 후]
+            │       - 토스트 메시지: "✅ N개의 메모 동기화 완료." (성공 시)
+            │       - 토스트 메시지: "⚠️ 외부 서비스 연결 불가. 검색 제한됨."
+            │
+            └─ 성공 →
+                - 모든 기능 활성화
+                - handleSyncSuccess(true) 호출
+                    ↓
+                [동기화 시작]
+                    ↓
+                [동기화 완료 후]
+                    - 토스트 메시지: "✅ N개의 메모 동기화 완료." (성공 시)
+                    - 토스트 메시지: "❌ 동기화 중 오류가 발생했습니다." (실패 시)
+                - 도서 검색 버튼 활성화
+```
+
+**토스트 메시지 표시 시점:**
+
+1. **Heartbeat 성공 후**: 2단계 헬스체크(로컬 서버 + 외부 서비스)가 모두 성공한 경우
+2. **모든 백그라운드 동기화 작업 완료 직후**: `syncPendingMemos()` 호출이 완료되고 성공/실패 응답을 받은 후
+3. **외부 서비스 연결 불가 시**: 외부 서비스 헬스체크 실패 시 즉시 경고 메시지 표시
+
+**토스트 메시지 예시:**
+
+- ✅ **성공**: `"✅ 3개의 메모 동기화 완료."`
+- ⚠️ **경고**: `"⚠️ 외부 서비스 연결 불가. 검색 제한됨."`
+- ❌ **에러**: `"❌ 동기화 중 오류가 발생했습니다."`
+
+**토스트 메시지 특징:**
+
+- **위치**: 우측 하단에 표시
+- **스타일**: 간결하고 일시적인 알림
+- **자동 제거**: 3초 후 자동으로 사라짐 (사용자 설정 가능)
+- **사용자 경험**: 시스템 내부 과정을 알 필요 없이 결과만 확인 가능
+
+**서버의 역할:**
+- 서버는 외부 환경(알라딘 API)과의 연결 가능 여부라는 데이터만 클라이언트에게 전달
+- `200 OK` 또는 `503 Service Unavailable` 응답 코드를 반환
+- 프론트엔드는 서버가 보내준 데이터를 기반으로 **"도서 검색 버튼을 활성화할지, 비활성화하고 메시지를 보여줄지"**를 스스로 결정하고 실행
 
 **Option 3: 동기화 시도 시 실제 연결 확인**
 ```javascript
@@ -2024,16 +2399,20 @@ class OfflineMemoService {
     /**
      * 대기 중인 메모 동기화
      * 동기화 큐에서 PENDING 항목을 가져와서 처리
+     * @returns {Promise<{successCount: number, failedCount: number}>} 동기화 결과 (성공/실패 개수)
      */
     async syncPendingMemos() {
         if (!networkMonitor.isOnline) {
             console.log('네트워크가 오프라인 상태입니다.');
-            return;
+            return { successCount: 0, failedCount: 0 };
         }
 
         // 동기화 큐에서 PENDING 항목 조회
         const pendingQueueItems = await syncQueueManager.getPendingItems();
         console.log(`동기화할 항목 수: ${pendingQueueItems.length}`);
+
+        let successCount = 0;
+        let failedCount = 0;
 
         // 순서 보장: createdAt 기준 정렬
         pendingQueueItems.sort((a, b) => {
@@ -2045,11 +2424,16 @@ class OfflineMemoService {
         for (const queueItem of pendingQueueItems) {
             try {
                 await this.syncQueueItem(queueItem);
+                successCount++;
             } catch (error) {
                 console.error(`동기화 실패 (${queueItem.id}):`, error);
+                failedCount++;
                 // 재시도 로직은 syncQueueManager에서 처리
             }
         }
+        
+        // 동기화 결과 반환 (토스트 메시지 표시에 사용)
+        return { successCount, failedCount };
     }
 
     /**
@@ -3736,119 +4120,6 @@ console.log('ℹ️ [Info]', ...);        // 기본색
 
 ---
 
-#### 모니터링 방법 2: 브라우저 확장 프로그램 (선택사항)
-
-**추천 확장 프로그램 (무료):**
-
-##### 1. Vue.js DevTools (Vue 사용 시)
-- 브라우저 확장 프로그램 설치
-- 상태 추적 가능
-
-##### 2. React Developer Tools (React 사용 시)
-- 브라우저 확장 프로그램 설치
-- 컴포넌트 상태 모니터링
-
-**단점:**
-- ⚠️ 특정 프레임워크에 종속
-- ⚠️ 순수 JavaScript 프로젝트에는 부적합
-
-**결론**: 순수 JavaScript 프로젝트이므로 브라우저 확장 프로그램보다는 **브라우저 DevTools**가 더 적합합니다.
-
----
-
-#### 모니터링 데이터 저장 (선택사항)
-
-**로컬 저장소에 모니터링 데이터 저장:**
-
-```javascript
-// IndexedDB에 모니터링 이벤트 저장
-async function saveMonitoringEvent(event) {
-    const db = await dbManager.init();
-    const transaction = db.transaction(['monitoring_events'], 'readwrite');
-    const store = transaction.objectStore('monitoring_events');
-    await store.add(event);
-}
-
-// 모니터링 이벤트 조회
-async function getMonitoringEvents(startDate, endDate) {
-    const db = await dbManager.init();
-    const transaction = db.transaction(['monitoring_events'], 'readonly');
-    const store = transaction.objectStore('monitoring_events');
-    const index = store.index('timestamp');
-    
-    const range = IDBKeyRange.bound(startDate, endDate);
-    return index.getAll(range);
-}
-```
-
----
-
-#### 실시간 알림 시스템 (선택사항)
-
-**중요한 이벤트 발생 시 알림:**
-
-```javascript
-// utils/notification-service.js
-class NotificationService {
-    /**
-     * 브라우저 알림 표시 (사용자 허용 필요)
-     */
-    async showNotification(title, message, type = 'info') {
-        // 브라우저 알림 권한 확인
-        if (Notification.permission === 'granted') {
-            new Notification(title, {
-                body: message,
-                icon: '/icon.png',
-                tag: 'sync-status'
-            });
-        } else if (Notification.permission !== 'denied') {
-            // 권한 요청
-            const permission = await Notification.requestPermission();
-            if (permission === 'granted') {
-                this.showNotification(title, message, type);
-            }
-        }
-    }
-
-    /**
-     * 동기화 완료 알림
-     */
-    notifySyncComplete(count) {
-        this.showNotification(
-            '동기화 완료',
-            `${count}개의 메모가 성공적으로 동기화되었습니다.`,
-            'success'
-        );
-    }
-
-    /**
-     * 동기화 실패 알림
-     */
-    notifySyncFailed(error) {
-        this.showNotification(
-            '동기화 실패',
-            `메모 동기화 중 오류가 발생했습니다: ${error.message}`,
-            'error'
-        );
-    }
-
-    /**
-     * 네트워크 복구 알림
-     */
-    notifyNetworkRecovered() {
-        this.showNotification(
-            '네트워크 연결 복구',
-            '네트워크가 복구되었습니다. 대기 중인 메모를 동기화합니다.',
-            'info'
-        );
-    }
-}
-
-export const notificationService = new NotificationService();
-```
-
----
-
 #### 모니터링 체크리스트
 
 **실시간 모니터링 확인 항목:**
@@ -3860,6 +4131,28 @@ export const notificationService = new NotificationService();
 - [ ] 동기화 진행 상황 표시
 - [ ] 에러 로그 조회 가능
 - [ ] 성능 메트릭 확인 가능
+- [ ] **UI 피드백 (토스트 메시지)**: 사용자가 동기화 결과를 확인할 수 있도록 우측 하단에 토스트 메시지 표시
+
+**모니터링 방법:**
+
+1. **브라우저 DevTools** (1차 확인)
+   - Network 탭: API 요청/응답 확인
+   - Application 탭: IndexedDB 데이터 확인
+   - Console 탭: 로그 메시지 확인
+   - Performance 탭: 성능 분석
+
+2. **서버 Console 로그** (2차 확인)
+   - 서버 애플리케이션 콘솔에서 로그 확인
+   - 에러 및 예외 상황 추적
+
+3. **DB 데이터 확인** (3차 확인)
+   - 서버 DB에서 실제 저장된 데이터 확인
+   - 데이터 무결성 검증
+
+4. **UI 피드백 (토스트 메시지)** (사용자 대상)
+   - Heartbeat 성공 후, 모든 백그라운드 동기화 작업이 완료된 직후
+   - 우측 하단에 간결한 토스트 메시지 표시
+   - 사용자가 시스템 내부 과정을 알 필요 없이 결과만 확인
 
 ---
 

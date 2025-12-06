@@ -57,19 +57,43 @@ public class MemoController extends BaseV1Controller {
     @Autowired
     private TagRepository tagRepository;
     
+    @Autowired
+    private com.readingtracker.server.service.IdempotencyKeyService idempotencyKeyService;
+    
     /**
      * 메모 작성
      * POST /api/v1/memos
+     * 
+     * 멱등성 보장:
+     * - 클라이언트가 Idempotency-Key 헤더에 UUID를 포함하여 전송
+     * - 동일한 키로 여러 번 요청해도 중복 메모가 생성되지 않음
+     * - 네트워크 재차단 시에도 안전하게 재시도 가능
      */
     @PostMapping("/memos")
     @Operation(
         summary = "메모 작성",
-        description = "독서 중 메모를 작성합니다. 페이지당 메모 개수 제한 없이 자유롭게 기록할 수 있습니다.",
+        description = "독서 중 메모를 작성합니다. 페이지당 메모 개수 제한 없이 자유롭게 기록할 수 있습니다. " +
+                     "Idempotency-Key 헤더를 포함하면 중복 요청을 방지할 수 있습니다.",
         security = @SecurityRequirement(name = "bearerAuth")
     )
     public ApiResponse<MemoResponse> createMemo(
+            @Parameter(description = "멱등성 키 (선택, 중복 요청 방지용)", required = false)
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             @Parameter(description = "메모 작성 요청", required = true)
             @Valid @RequestBody MemoCreateRequest request) {
+        
+        // 1. 멱등성 키 검증 및 처리
+        if (idempotencyKey != null && !idempotencyKey.isEmpty()) {
+            ApiResponse<MemoResponse> cachedResponse = 
+                idempotencyKeyService.getCachedResponse(idempotencyKey);
+            if (cachedResponse != null) {
+                // 캐시된 응답 반환 (중복 요청 무시)
+                return cachedResponse;
+            }
+            
+            // PROCESSING 상태로 저장 (분산 저장소에 빠르게 저장하여 동시성 이슈 방지)
+            idempotencyKeyService.markAsProcessing(idempotencyKey);
+        }
         
         User user = getCurrentUser();
         
@@ -90,7 +114,14 @@ public class MemoController extends BaseV1Controller {
         
         // Mapper를 통한 Entity → ResponseDTO 변환
         MemoResponse response = memoMapper.toMemoResponse(savedMemo);
-        return ApiResponse.success(response);
+        ApiResponse<MemoResponse> apiResponse = ApiResponse.success(response);
+        
+        // 2. 멱등성 키가 있으면 COMPLETED로 저장 및 응답 캐싱
+        if (idempotencyKey != null && !idempotencyKey.isEmpty()) {
+            idempotencyKeyService.markAsCompleted(idempotencyKey, apiResponse);
+        }
+        
+        return apiResponse;
     }
     
     /**
