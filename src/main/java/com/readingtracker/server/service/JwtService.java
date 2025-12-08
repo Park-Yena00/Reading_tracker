@@ -3,20 +3,24 @@ package com.readingtracker.server.service;
 import com.readingtracker.server.config.JwtConfig;
 import com.readingtracker.dbms.entity.User;
 import com.readingtracker.dbms.entity.UserDevice;
-import com.readingtracker.dbms.repository.UserDeviceRepository;
-import com.readingtracker.dbms.repository.UserRepository;
+import com.readingtracker.dbms.repository.primary.UserDeviceRepository;
+import com.readingtracker.dbms.repository.primary.UserRepository;
 import com.readingtracker.server.common.util.JwtUtil;
 import com.readingtracker.server.service.RefreshTokenRedisService.RefreshTokenData;
+import com.readingtracker.server.service.write.DualMasterWriteService;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Lazy;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.HashMap;
+import java.util.Map;
 
 @Service
-@Transactional
+// @Transactional 제거 (Dual Write를 위해)
 public class JwtService {
     @Autowired
     private JwtUtil jwtUtil;
@@ -32,6 +36,13 @@ public class JwtService {
     
     @Autowired
     private JwtConfig jwtConfig;
+    
+    @Autowired
+    private DualMasterWriteService dualMasterWriteService;
+    
+    @Autowired
+    @Qualifier("secondaryNamedParameterJdbcTemplate")
+    private NamedParameterJdbcTemplate secondaryNamedParameterJdbcTemplate;
     
     // 자기 자신 주입 (비동기 메서드 호출을 위해 필요)
     // @Lazy를 사용하여 순환 참조 방지
@@ -143,27 +154,114 @@ public class JwtService {
         return "WEB"; // 유효하지 않은 값은 기본값으로
     }
     
+    /**
+     * 디바이스 저장/업데이트
+     * Dual Write 적용: Primary는 JPA Repository, Secondary는 JdbcTemplate 사용
+     */
     private UserDevice saveOrUpdateDevice(User user, String deviceId, String deviceName, String platform) {
         UserDevice device = userDeviceRepository.findByUserIdAndDeviceId(user.getId(), deviceId).orElse(null);
         
         if (device == null) {
             // 새 디바이스 생성
             device = new UserDevice(user, deviceId, deviceName, UserDevice.Platform.valueOf(platform));
+            return saveUserDeviceWithDualWrite(device);
         } else {
             // 기존 디바이스 업데이트
             device.setDeviceName(deviceName);
             device.setLastSeenAt(LocalDateTime.now());
+            return updateUserDeviceWithDualWrite(device);
         }
+    }
+    
+    /**
+     * UserDevice 저장을 Dual Write로 처리하는 헬퍼 메서드
+     */
+    private UserDevice saveUserDeviceWithDualWrite(UserDevice device) {
+        return dualMasterWriteService.writeWithDualWrite(
+            // Primary: JPA Repository 사용
+            () -> userDeviceRepository.save(device),
+            
+            // Secondary: JdbcTemplate 사용
+            (jdbcTemplate, savedDevice) -> {
+                String insertDeviceSql = "INSERT INTO user_devices (id, user_id, device_id, device_name, platform, last_seen_at, created_at) " +
+                                       "VALUES (:id, :userId, :deviceId, :deviceName, :platform, :lastSeenAt, :createdAt)";
+                
+                LocalDateTime now = LocalDateTime.now();
+                Map<String, Object> deviceParams = new HashMap<>();
+                deviceParams.put("id", savedDevice.getId());
+                deviceParams.put("userId", savedDevice.getUser() != null ? savedDevice.getUser().getId() : null);
+                deviceParams.put("deviceId", savedDevice.getDeviceId());
+                deviceParams.put("deviceName", savedDevice.getDeviceName());
+                deviceParams.put("platform", savedDevice.getPlatform() != null ? savedDevice.getPlatform().name() : null);
+                deviceParams.put("lastSeenAt", savedDevice.getLastSeenAt());
+                deviceParams.put("createdAt", savedDevice.getCreatedAt() != null ? savedDevice.getCreatedAt() : now);
+                
+                secondaryNamedParameterJdbcTemplate.update(insertDeviceSql, deviceParams);
+                return null;
+            },
+            
+            // 보상 트랜잭션: Primary에서 DELETE
+            (savedDevice) -> {
+                if (savedDevice != null && savedDevice.getId() != null) {
+                    userDeviceRepository.deleteById(savedDevice.getId());
+                }
+                return null;
+            },
+            "UserDevice"  // 엔티티 타입 (Recovery Queue 발행용)
+        );
+    }
+    
+    /**
+     * UserDevice 업데이트를 Dual Write로 처리하는 헬퍼 메서드
+     */
+    private UserDevice updateUserDeviceWithDualWrite(UserDevice device) {
+        // 이전 상태 저장 (보상 트랜잭션용)
+        UserDevice originalState = new UserDevice();
+        originalState.setId(device.getId());
+        originalState.setDeviceName(device.getDeviceName());
+        originalState.setPlatform(device.getPlatform());
+        originalState.setLastSeenAt(device.getLastSeenAt());
         
-        return userDeviceRepository.save(device);
+        return dualMasterWriteService.writeWithDualWrite(
+            // Primary: JPA Repository 사용
+            () -> userDeviceRepository.save(device),
+            
+            // Secondary: JdbcTemplate 사용
+            (jdbcTemplate, updatedDevice) -> {
+                String updateDeviceSql = "UPDATE user_devices SET device_name = :deviceName, " +
+                                       "platform = :platform, last_seen_at = :lastSeenAt " +
+                                       "WHERE id = :id";
+                
+                Map<String, Object> updateParams = new HashMap<>();
+                updateParams.put("id", updatedDevice.getId());
+                updateParams.put("deviceName", updatedDevice.getDeviceName());
+                updateParams.put("platform", updatedDevice.getPlatform() != null ? updatedDevice.getPlatform().name() : null);
+                updateParams.put("lastSeenAt", updatedDevice.getLastSeenAt());
+                
+                secondaryNamedParameterJdbcTemplate.update(updateDeviceSql, updateParams);
+                return null;
+            },
+            
+            // 보상 트랜잭션: Primary에서 원래 상태로 복구
+            (updatedDevice) -> {
+                if (updatedDevice != null) {
+                    device.setDeviceName(originalState.getDeviceName());
+                    device.setPlatform(originalState.getPlatform());
+                    device.setLastSeenAt(originalState.getLastSeenAt());
+                    userDeviceRepository.save(device);
+                }
+                return null;
+            },
+            "UserDevice"  // 엔티티 타입 (Recovery Queue 발행용)
+        );
     }
     
     /**
      * 디바이스 정보 저장/업데이트 (비동기 처리)
      * 로그인 응답 시간을 단축하기 위해 비동기로 처리
+     * Dual Write 적용됨 (saveOrUpdateDevice 내부에서 처리)
      */
     @Async("taskExecutor")
-    @Transactional
     public void saveOrUpdateDeviceAsync(User user, String deviceId, String deviceName, String platform) {
         try {
             saveOrUpdateDevice(user, deviceId, deviceName, platform);
@@ -183,9 +281,9 @@ public class JwtService {
     /**
      * 리프레시 토큰 저장 (비동기 처리)
      * 로그인 응답 시간을 단축하기 위해 비동기로 처리
+     * Redis에만 저장하므로 DB Write 없음
      */
     @Async("taskExecutor")
-    @Transactional
     public void saveRefreshTokenAsync(User user, String deviceId, String refreshToken) {
         try {
             saveRefreshToken(user, deviceId, refreshToken);
@@ -251,11 +349,11 @@ public class JwtService {
         // 10. 새 Refresh Token DB 저장
         saveRefreshToken(user, deviceId, newRefreshToken);
         
-        // 11. 디바이스 정보 업데이트 (last_seen_at)
+        // 11. 디바이스 정보 업데이트 (last_seen_at) - Dual Write 적용
         UserDevice device = userDeviceRepository.findByUserIdAndDeviceId(userId, deviceId)
             .orElseThrow(() -> new IllegalArgumentException("디바이스 정보를 찾을 수 없습니다."));
         device.setLastSeenAt(LocalDateTime.now());
-        userDeviceRepository.save(device);
+        updateUserDeviceWithDualWrite(device);
         
         return new TokenResult(newAccessToken, newRefreshToken, device);
     }

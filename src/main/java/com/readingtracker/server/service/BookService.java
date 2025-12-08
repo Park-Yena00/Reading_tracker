@@ -4,22 +4,28 @@ import com.readingtracker.server.common.constant.BookCategory;
 import com.readingtracker.server.common.constant.BookSortCriteria;
 import com.readingtracker.dbms.entity.Book;
 import com.readingtracker.dbms.entity.UserShelfBook;
-import com.readingtracker.dbms.repository.BookRepository;
-import com.readingtracker.dbms.repository.UserShelfBookRepository;
+import com.readingtracker.dbms.repository.primary.BookRepository;
+import com.readingtracker.dbms.repository.primary.UserShelfBookRepository;
+import com.readingtracker.server.service.write.DualMasterWriteService;
+import com.readingtracker.server.dto.UserShelfBookCacheDTO;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 @Service
-@Transactional
+// @Transactional 제거 (Dual Write를 위해)
 public class BookService {
     
     @Autowired
@@ -29,7 +35,26 @@ public class BookService {
     private UserShelfBookRepository userBookRepository;
     
     @Autowired
+    private com.readingtracker.dbms.repository.primary.UserRepository userRepository;
+    
+    @Autowired
     private RedisTemplate<String, Object> redisTemplate;
+    
+    @Autowired
+    private DualMasterWriteService dualMasterWriteService;
+    
+    @Autowired
+    @Qualifier("secondaryNamedParameterJdbcTemplate")
+    private NamedParameterJdbcTemplate secondaryNamedParameterJdbcTemplate;
+    
+    @Autowired
+    private com.readingtracker.server.service.recovery.RecoveryQueueService recoveryQueueService;
+    
+    @Autowired
+    private com.readingtracker.server.service.read.DualMasterReadService dualMasterReadService;
+    
+    @Autowired
+    private com.readingtracker.server.mapper.BookMapper bookMapper;
     
     private static final String CACHE_KEY_PREFIX = "my_shelf:user:";
     private static final long TTL_MINUTES = 5; // 5분 (안전망 역할)
@@ -37,6 +62,11 @@ public class BookService {
     /**
      * 내 서재에 책 추가
      * 문서: MAPSTRUCT_ARCHITECTURE_DESIGN.md 준수 - Entity만 받음
+     * 
+     * Dual Write 적용: 복잡한 비즈니스 로직을 원자적 단위로 분리
+     * 1. Book 조회/생성 (원자적 단위 1)
+     * 2. UserShelfBook 저장 (원자적 단위 2, Dual Write 적용)
+     * 3. Redis 캐시 무효화 (부수 효과, DB 트랜잭션 외부)
      */
     public UserShelfBook addBookToShelf(UserShelfBook userShelfBook) {
         // 1. ISBN으로 Book 테이블에 이미 존재하는지 확인
@@ -57,8 +87,8 @@ public class BookService {
                 // 기존 Book이 있으면 재사용
                 savedBook = existingBook.get();
             } else {
-                // 기존 Book이 없으면 새로 생성
-                savedBook = bookRepository.save(book);
+                // 기존 Book이 없으면 새로 생성 (Dual Write 적용)
+                savedBook = saveBookWithDualWrite(book);
             }
         }
         
@@ -75,13 +105,189 @@ public class BookService {
         // 4. 카테고리별 입력값 검증
         validateCategorySpecificFields(userShelfBook);
         
-        // 5. UserShelfBook 저장
-        UserShelfBook savedUserShelfBook = userBookRepository.save(userShelfBook);
+        // 5. UserShelfBook 저장 (Dual Write 적용)
+        UserShelfBook savedUserShelfBook = saveUserShelfBookWithDualWrite(userShelfBook);
         
-        // 6. 내 서재 캐시 무효화 (Write-Through 패턴)
+        // 6. 내 서재 캐시 무효화 (부수 효과, DB 트랜잭션 외부로 분리)
         invalidateMyShelfCache(userShelfBook.getUserId());
         
         return savedUserShelfBook;
+    }
+    
+    /**
+     * Book 저장 (원자적 단위 1, Dual Write 적용)
+     */
+    private Book saveBookWithDualWrite(Book book) {
+        return dualMasterWriteService.writeWithDualWrite(
+            // Primary: JPA Repository 사용
+            () -> bookRepository.save(book),
+            
+            // Secondary: JdbcTemplate 사용
+            (jdbcTemplate, savedBook) -> {
+                // Book 테이블 INSERT (실제 컬럼명 사용)
+                String insertBookSql = "INSERT INTO books (id, isbn, title, author, publisher, " +
+                                     "total_pages, description, cover_url, main_genre, pub_date, created_at, updated_at) " +
+                                     "VALUES (:id, :isbn, :title, :author, :publisher, " +
+                                     ":totalPages, :description, :coverUrl, :mainGenre, :pubDate, :createdAt, :updatedAt)";
+                
+                LocalDateTime now = LocalDateTime.now();
+                Map<String, Object> bookParams = new HashMap<>();
+                bookParams.put("id", savedBook.getId());
+                bookParams.put("isbn", savedBook.getIsbn());
+                bookParams.put("title", savedBook.getTitle());
+                bookParams.put("author", savedBook.getAuthor());
+                bookParams.put("publisher", savedBook.getPublisher());
+                bookParams.put("totalPages", savedBook.getTotalPages());
+                bookParams.put("description", savedBook.getDescription());
+                bookParams.put("coverUrl", savedBook.getCoverUrl());
+                bookParams.put("mainGenre", savedBook.getMainGenre());
+                bookParams.put("pubDate", savedBook.getPubDate());
+                bookParams.put("createdAt", savedBook.getCreatedAt() != null ? savedBook.getCreatedAt() : now);
+                bookParams.put("updatedAt", savedBook.getUpdatedAt() != null ? savedBook.getUpdatedAt() : now);
+                
+                secondaryNamedParameterJdbcTemplate.update(insertBookSql, bookParams);
+                return null;
+            },
+            
+            // 보상 트랜잭션: Primary에서 DELETE
+            (savedBook) -> {
+                if (savedBook != null && savedBook.getId() != null) {
+                    bookRepository.deleteById(savedBook.getId());
+                }
+                return null;
+            },
+            "Book"  // 엔티티 타입 (Recovery Queue 발행용)
+        );
+    }
+    
+    /**
+     * UserShelfBook 저장 (원자적 단위 2, Dual Write 적용)
+     */
+    private UserShelfBook saveUserShelfBookWithDualWrite(UserShelfBook userShelfBook) {
+        return dualMasterWriteService.writeWithDualWrite(
+            // Primary: JPA Repository 사용
+            () -> {
+                userShelfBook.setUpdatedAt(LocalDateTime.now());
+                return userBookRepository.save(userShelfBook);
+            },
+            
+            // Secondary: JdbcTemplate 사용
+            (jdbcTemplate, savedUserShelfBook) -> {
+                String insertUserShelfBookSql = "INSERT INTO user_books (id, user_id, book_id, category, " +
+                                               "category_manually_set, expectation, reading_start_date, " +
+                                               "reading_progress, purchase_type, reading_finished_date, " +
+                                               "rating, review, created_at, updated_at) " +
+                                               "VALUES (:id, :userId, :bookId, :category, " +
+                                               ":categoryManuallySet, :expectation, :readingStartDate, " +
+                                               ":readingProgress, :purchaseType, :readingFinishedDate, " +
+                                               ":rating, :review, :createdAt, :updatedAt)";
+                
+                LocalDateTime now = LocalDateTime.now();
+                Map<String, Object> params = new HashMap<>();
+                params.put("id", savedUserShelfBook.getId());
+                params.put("userId", savedUserShelfBook.getUserId());
+                params.put("bookId", savedUserShelfBook.getBook() != null ? savedUserShelfBook.getBook().getId() : null);
+                params.put("category", savedUserShelfBook.getCategory() != null ? savedUserShelfBook.getCategory().name() : null);
+                params.put("categoryManuallySet", savedUserShelfBook.isCategoryManuallySet() != null ? savedUserShelfBook.isCategoryManuallySet() : false);
+                params.put("expectation", savedUserShelfBook.getExpectation());
+                params.put("readingStartDate", savedUserShelfBook.getReadingStartDate());
+                params.put("readingProgress", savedUserShelfBook.getReadingProgress());
+                params.put("purchaseType", savedUserShelfBook.getPurchaseType() != null ? savedUserShelfBook.getPurchaseType().name() : null);
+                params.put("readingFinishedDate", savedUserShelfBook.getReadingFinishedDate());
+                params.put("rating", savedUserShelfBook.getRating());
+                params.put("review", savedUserShelfBook.getReview());
+                params.put("createdAt", savedUserShelfBook.getCreatedAt() != null ? savedUserShelfBook.getCreatedAt() : now);
+                params.put("updatedAt", savedUserShelfBook.getUpdatedAt() != null ? savedUserShelfBook.getUpdatedAt() : now);
+                
+                secondaryNamedParameterJdbcTemplate.update(insertUserShelfBookSql, params);
+                return null;
+            },
+            
+            // 보상 트랜잭션: Primary에서 DELETE
+            (savedUserShelfBook) -> {
+                if (savedUserShelfBook != null && savedUserShelfBook.getId() != null) {
+                    userBookRepository.deleteById(savedUserShelfBook.getId());
+                }
+                return null;
+            },
+            "UserShelfBook"  // 엔티티 타입 (Recovery Queue 발행용)
+        );
+    }
+    
+    /**
+     * UserShelfBook 업데이트를 Dual Write로 처리하는 헬퍼 메서드
+     * 
+     * @param userShelfBook 업데이트할 UserShelfBook 엔티티
+     * @return 업데이트된 UserShelfBook 엔티티
+     */
+    private UserShelfBook updateUserShelfBookWithDualWrite(UserShelfBook userShelfBook) {
+        // 이전 상태 저장 (보상 트랜잭션용)
+        UserShelfBook originalState = new UserShelfBook();
+        originalState.setId(userShelfBook.getId());
+        originalState.setCategory(userShelfBook.getCategory());
+        originalState.setCategoryManuallySet(userShelfBook.isCategoryManuallySet());
+        originalState.setExpectation(userShelfBook.getExpectation());
+        originalState.setReadingStartDate(userShelfBook.getReadingStartDate());
+        originalState.setReadingProgress(userShelfBook.getReadingProgress());
+        originalState.setPurchaseType(userShelfBook.getPurchaseType());
+        originalState.setReadingFinishedDate(userShelfBook.getReadingFinishedDate());
+        originalState.setRating(userShelfBook.getRating());
+        originalState.setReview(userShelfBook.getReview());
+        originalState.setUpdatedAt(userShelfBook.getUpdatedAt());
+        
+        return dualMasterWriteService.writeWithDualWrite(
+            // Primary: JPA Repository 사용
+            () -> {
+                userShelfBook.setUpdatedAt(LocalDateTime.now());
+                return userBookRepository.save(userShelfBook);
+            },
+            
+            // Secondary: JdbcTemplate 사용
+            (jdbcTemplate, updatedUserShelfBook) -> {
+                String updateUserShelfBookSql = "UPDATE user_books SET category = :category, " +
+                                               "category_manually_set = :categoryManuallySet, " +
+                                               "expectation = :expectation, reading_start_date = :readingStartDate, " +
+                                               "reading_progress = :readingProgress, purchase_type = :purchaseType, " +
+                                               "reading_finished_date = :readingFinishedDate, rating = :rating, " +
+                                               "review = :review, updated_at = :updatedAt " +
+                                               "WHERE id = :id";
+                
+                Map<String, Object> updateParams = new HashMap<>();
+                updateParams.put("id", updatedUserShelfBook.getId());
+                updateParams.put("category", updatedUserShelfBook.getCategory() != null ? updatedUserShelfBook.getCategory().name() : null);
+                updateParams.put("categoryManuallySet", updatedUserShelfBook.isCategoryManuallySet() != null ? updatedUserShelfBook.isCategoryManuallySet() : false);
+                updateParams.put("expectation", updatedUserShelfBook.getExpectation());
+                updateParams.put("readingStartDate", updatedUserShelfBook.getReadingStartDate());
+                updateParams.put("readingProgress", updatedUserShelfBook.getReadingProgress());
+                updateParams.put("purchaseType", updatedUserShelfBook.getPurchaseType() != null ? updatedUserShelfBook.getPurchaseType().name() : null);
+                updateParams.put("readingFinishedDate", updatedUserShelfBook.getReadingFinishedDate());
+                updateParams.put("rating", updatedUserShelfBook.getRating());
+                updateParams.put("review", updatedUserShelfBook.getReview());
+                updateParams.put("updatedAt", LocalDateTime.now());
+                
+                secondaryNamedParameterJdbcTemplate.update(updateUserShelfBookSql, updateParams);
+                return null;
+            },
+            
+            // 보상 트랜잭션: Primary에서 원래 상태로 복구
+            (updatedUserShelfBook) -> {
+                if (updatedUserShelfBook != null) {
+                    userShelfBook.setCategory(originalState.getCategory());
+                    userShelfBook.setCategoryManuallySet(originalState.isCategoryManuallySet());
+                    userShelfBook.setExpectation(originalState.getExpectation());
+                    userShelfBook.setReadingStartDate(originalState.getReadingStartDate());
+                    userShelfBook.setReadingProgress(originalState.getReadingProgress());
+                    userShelfBook.setPurchaseType(originalState.getPurchaseType());
+                    userShelfBook.setReadingFinishedDate(originalState.getReadingFinishedDate());
+                    userShelfBook.setRating(originalState.getRating());
+                    userShelfBook.setReview(originalState.getReview());
+                    userShelfBook.setUpdatedAt(originalState.getUpdatedAt());
+                    userBookRepository.save(userShelfBook);
+                }
+                return null;
+            },
+            "UserShelfBook"  // 엔티티 타입 (Recovery Queue 발행용)
+        );
     }
     
     /**
@@ -213,9 +419,10 @@ public class BookService {
         userBook.setCategoryManuallySet(true);
         userBook.setUpdatedAt(LocalDateTime.now());
         
-        UserShelfBook savedBook = userBookRepository.save(userBook);
+        // Dual Write 적용
+        UserShelfBook savedBook = updateUserShelfBookWithDualWrite(userBook);
         
-        // 내 서재 캐시 무효화 (Write-Through 패턴)
+        // 내 서재 캐시 무효화 (부수 효과, DB 트랜잭션 외부로 분리)
         invalidateMyShelfCache(userBook.getUserId());
         
         return savedBook;
@@ -224,34 +431,40 @@ public class BookService {
     /**
      * 내 서재 조회
      * userId를 받아서 처리
+     * 
+     * Dual Read 적용: Primary에서 읽기 시도, 실패 시 Secondary로 Failover
+     * Redis 캐싱: DTO 변환 후 저장하여 순환 참조 방지
+     * 문서: MAPSTRUCT_ARCHITECTURE_DESIGN.md 준수 - DTO 변환은 Mapper가 담당
      */
     @Transactional(readOnly = true)
     @SuppressWarnings("unchecked")
     public List<UserShelfBook> getMyShelf(Long userId, BookCategory category, BookSortCriteria sortBy) {
         // 1. 정렬 기준이 지정되지 않은 경우 기본값은 도서명 오름차순
-        if (sortBy == null) {
-            sortBy = BookSortCriteria.TITLE;
-        }
+        final BookSortCriteria finalSortBy = (sortBy != null) ? sortBy : BookSortCriteria.TITLE;
         
         // 2. 캐시 키 생성
-        String cacheKey = buildCacheKey(userId, category, sortBy);
+        String cacheKey = buildCacheKey(userId, category, finalSortBy);
         
-        // 3. Redis 캐시 확인
-        List<UserShelfBook> cachedBooks = (List<UserShelfBook>) redisTemplate.opsForValue().get(cacheKey);
-        if (cachedBooks != null) {
-            return cachedBooks;
+        // 3. Redis 캐시 확인 (DTO로 저장되어 있음)
+        List<UserShelfBookCacheDTO> cachedDtos = (List<UserShelfBookCacheDTO>) redisTemplate.opsForValue().get(cacheKey);
+        if (cachedDtos != null) {
+            // Mapper를 통해 DTO를 엔티티로 변환하여 반환
+            return bookMapper.toUserShelfBookEntityList(cachedDtos, userRepository);
         }
         
-        // 4. DB 조회
-        List<UserShelfBook> books;
-        if (category != null) {
-            books = getMyShelfByCategoryAndSort(userId, category, sortBy);
-        } else {
-            books = getMyShelfBySort(userId, sortBy);
-        }
+        // 4. DB 조회 (Dual Read Failover 적용)
+        final BookCategory finalCategory = category; // effectively final
+        List<UserShelfBook> books = dualMasterReadService.readWithFailover(() -> {
+            if (finalCategory != null) {
+                return getMyShelfByCategoryAndSort(userId, finalCategory, finalSortBy);
+            } else {
+                return getMyShelfBySort(userId, finalSortBy);
+            }
+        });
         
-        // 5. Redis에 저장 (TTL: 5분)
-        redisTemplate.opsForValue().set(cacheKey, books, TTL_MINUTES, TimeUnit.MINUTES);
+        // 5. Mapper를 통해 엔티티를 DTO로 변환하여 Redis에 저장 (TTL: 5분)
+        List<UserShelfBookCacheDTO> dtos = bookMapper.toUserShelfBookCacheDTOList(books);
+        redisTemplate.opsForValue().set(cacheKey, dtos, TTL_MINUTES, TimeUnit.MINUTES);
         
         return books;
     }
@@ -317,21 +530,61 @@ public class BookService {
     /**
      * 내 서재에서 책 제거
      * UserShelfBook Entity를 받아서 처리
+     * 
+     * Dual Write 적용: Primary는 JPA Repository, Secondary는 JdbcTemplate 사용
      */
     public void removeBookFromShelf(UserShelfBook userBook) {
         // 소유권 확인은 Controller에서 이미 완료된 것으로 가정
         Long userId = userBook.getUserId();
+        Long userBookId = userBook.getId();
         
-        // Entity만 받아서 삭제 처리
-        userBookRepository.delete(userBook);
+        // Dual Write 적용
+        dualMasterWriteService.writeWithDualWrite(
+            // Primary: JPA Repository 사용
+            () -> {
+                userBookRepository.delete(userBook);
+                return null;
+            },
+            
+            // Secondary: JdbcTemplate 사용
+            (jdbcTemplate, result) -> {
+                String deleteUserShelfBookSql = "DELETE FROM user_books WHERE id = :id";
+                Map<String, Object> deleteParams = new HashMap<>();
+                deleteParams.put("id", userBookId);
+                secondaryNamedParameterJdbcTemplate.update(deleteUserShelfBookSql, deleteParams);
+                return null;
+            },
+            
+            // 보상 트랜잭션: DELETE의 보상은 복구가 어려우므로 Recovery Queue에 발행
+            (result) -> {
+                com.readingtracker.server.service.recovery.CompensationFailureEvent event = 
+                    new com.readingtracker.server.service.recovery.CompensationFailureEvent(
+                        "DELETE_SECONDARY_CLEANUP",
+                        userBookId,
+                        "UserShelfBook",
+                        "Secondary",
+                        java.time.Instant.now(),
+                        "Primary DELETE 성공 후 Secondary DELETE 실패로 인한 유령 데이터 정리 필요"
+                    );
+                
+                recoveryQueueService.publish(event);
+                org.slf4j.LoggerFactory.getLogger(BookService.class)
+                    .warn("DELETE 보상 트랜잭션: Secondary 유령 데이터 정리를 위해 Recovery Queue에 발행 (userBookId: {})", userBookId);
+                
+                return null;
+            },
+            "UserShelfBook"  // 엔티티 타입 (Recovery Queue 발행용)
+        );
         
-        // 내 서재 캐시 무효화 (Write-Through 패턴)
+        // 내 서재 캐시 무효화 (부수 효과, DB 트랜잭션 외부로 분리)
         invalidateMyShelfCache(userId);
     }
     
     /**
      * 책 읽기 상태 변경
      * UserShelfBook Entity를 받아서 처리
+     * 
+     * Dual Write 적용: Primary는 JPA Repository, Secondary는 JdbcTemplate 사용
      */
     public void updateBookCategory(UserShelfBook userBook, BookCategory category) {
         // 소유권 확인은 Controller에서 이미 완료된 것으로 가정
@@ -341,9 +594,10 @@ public class BookService {
         userBook.setCategory(category);
         userBook.setUpdatedAt(LocalDateTime.now());
         
-        userBookRepository.save(userBook);
+        // Dual Write 적용
+        updateUserShelfBookWithDualWrite(userBook);
         
-        // 내 서재 캐시 무효화 (Write-Through 패턴)
+        // 내 서재 캐시 무효화 (부수 효과, DB 트랜잭션 외부로 분리)
         invalidateMyShelfCache(userId);
     }
     
@@ -383,7 +637,8 @@ public class BookService {
         userBook.setReview(null);
         userBook.setUpdatedAt(LocalDateTime.now());
         
-        return userBookRepository.save(userBook);
+        // Dual Write 적용
+        return updateUserShelfBookWithDualWrite(userBook);
     }
     
     /**
@@ -404,9 +659,10 @@ public class BookService {
         // 3. 업데이트 시간 갱신
         userBook.setUpdatedAt(LocalDateTime.now());
         
-        UserShelfBook savedBook = userBookRepository.save(userBook);
+        // Dual Write 적용
+        UserShelfBook savedBook = updateUserShelfBookWithDualWrite(userBook);
         
-        // 내 서재 캐시 무효화 (Write-Through 패턴)
+        // 내 서재 캐시 무효화 (부수 효과, DB 트랜잭션 외부로 분리)
         invalidateMyShelfCache(userBook.getUserId());
         
         return savedBook;

@@ -3,20 +3,24 @@ package com.readingtracker.server.service;
 import com.readingtracker.server.common.constant.ErrorCode;
 import com.readingtracker.dbms.entity.PasswordResetToken;
 import com.readingtracker.dbms.entity.User;
-import com.readingtracker.dbms.repository.PasswordResetTokenRepository;
-import com.readingtracker.dbms.repository.UserRepository;
+import com.readingtracker.dbms.repository.primary.PasswordResetTokenRepository;
+import com.readingtracker.dbms.repository.primary.UserRepository;
 import com.readingtracker.server.common.util.PasswordValidator;
+import com.readingtracker.server.service.write.DualMasterWriteService;
 
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.UUID;
 
 @Service
-@Transactional
+// @Transactional 제거 (Dual Write를 위해)
 public class AuthService {
     
     @Autowired
@@ -34,6 +38,13 @@ public class AuthService {
     @Autowired
     private PasswordResetTokenRepository passwordResetTokenRepository;
     
+    @Autowired
+    private DualMasterWriteService dualMasterWriteService;
+    
+    @Autowired
+    @Qualifier("secondaryNamedParameterJdbcTemplate")
+    private NamedParameterJdbcTemplate secondaryNamedParameterJdbcTemplate;
+    
     /**
      * 회원가입 - Controller에서 호출
      * @param user 사용자 Entity (Mapper를 통해 DTO에서 변환됨)
@@ -49,6 +60,8 @@ public class AuthService {
      * @param user 사용자 Entity
      * @param password 평문 비밀번호
      * @return 생성된 사용자 엔티티
+     * 
+     * Dual Write 적용: Primary는 JPA Repository, Secondary는 JdbcTemplate 사용
      */
     private User executeRegister(User user, String password) {
         // 1. 중복 확인
@@ -67,8 +80,45 @@ public class AuthService {
         String encodedPassword = passwordEncoder.encode(password);
         user.setPasswordHash(encodedPassword);
         
-        // 4. 저장
-        return userRepository.save(user);
+        // 4. 저장 (Dual Write)
+        return dualMasterWriteService.writeWithDualWrite(
+            // Primary: JPA Repository 사용
+            () -> userRepository.save(user),
+            
+            // Secondary: JdbcTemplate 사용
+            (jdbcTemplate, savedUser) -> {
+                String insertUserSql = "INSERT INTO users (id, login_id, email, name, password_hash, role, status, " +
+                                     "failed_login_count, last_login_at, created_at, updated_at) " +
+                                     "VALUES (:id, :loginId, :email, :name, :passwordHash, :role, :status, " +
+                                     ":failedLoginCount, :lastLoginAt, :createdAt, :updatedAt)";
+                
+                LocalDateTime now = LocalDateTime.now();
+                Map<String, Object> userParams = new HashMap<>();
+                userParams.put("id", savedUser.getId());
+                userParams.put("loginId", savedUser.getLoginId());
+                userParams.put("email", savedUser.getEmail());
+                userParams.put("name", savedUser.getName());
+                userParams.put("passwordHash", savedUser.getPasswordHash());
+                userParams.put("role", savedUser.getRole() != null ? savedUser.getRole().name() : "USER");
+                userParams.put("status", savedUser.getStatus() != null ? savedUser.getStatus().name() : "ACTIVE");
+                userParams.put("failedLoginCount", savedUser.getFailedLoginCount() != null ? savedUser.getFailedLoginCount() : 0);
+                userParams.put("lastLoginAt", savedUser.getLastLoginAt());
+                userParams.put("createdAt", savedUser.getCreatedAt() != null ? savedUser.getCreatedAt() : now);
+                userParams.put("updatedAt", savedUser.getUpdatedAt() != null ? savedUser.getUpdatedAt() : now);
+                
+                secondaryNamedParameterJdbcTemplate.update(insertUserSql, userParams);
+                return null;
+            },
+            
+            // 보상 트랜잭션: Primary에서 DELETE
+            (savedUser) -> {
+                if (savedUser != null && savedUser.getId() != null) {
+                    userRepository.deleteById(savedUser.getId());
+                }
+                return null;
+            },
+            "User"  // 엔티티 타입 (Recovery Queue 발행용)
+        );
     }
     
     /**
@@ -111,14 +161,15 @@ public class AuthService {
                 user.setStatus(User.Status.LOCKED);
             }
             
-            userRepository.save(user);
+            // Dual Write 적용
+            updateUserWithDualWrite(user);
             throw new IllegalArgumentException(ErrorCode.INVALID_PASSWORD.getMessage());
         }
         
         // 4. 로그인 성공 처리
         user.setFailedLoginCount(0); // 실패 횟수 초기화
         user.setLastLoginAt(LocalDateTime.now());
-        userRepository.save(user);
+        updateUserWithDualWrite(user);
         
         // 5. 토큰 생성 (디바이스 정보는 자동 생성)
         JwtService.TokenResult tokenResult = jwtService.generateTokens(
@@ -242,7 +293,7 @@ public class AuthService {
             throw new IllegalArgumentException("기존 비밀번호와 동일합니다.");
         }
         
-        // 7. 새 비밀번호 암호화 및 저장
+        // 7. 새 비밀번호 암호화 및 설정
         String newPasswordHash = passwordEncoder.encode(newPassword);
         user.setPasswordHash(newPasswordHash);
         
@@ -250,8 +301,8 @@ public class AuthService {
         tokenEntity.setUsed(true);
         passwordResetTokenRepository.save(tokenEntity);
         
-        // 9. 사용자 저장
-        return userRepository.save(user);
+        // 9. 사용자 저장 (Dual Write)
+        return updateUserWithDualWrite(user);
     }
     
     /**
@@ -261,6 +312,64 @@ public class AuthService {
      */
     public JwtService.TokenResult refreshAccessToken(String refreshToken) {
         return jwtService.refreshTokens(refreshToken);
+    }
+    
+    /**
+     * User 업데이트를 Dual Write로 처리하는 헬퍼 메서드
+     * 
+     * @param user 업데이트할 User 엔티티
+     * @return 업데이트된 User 엔티티
+     */
+    private User updateUserWithDualWrite(User user) {
+        // 이전 상태 저장 (보상 트랜잭션용)
+        User originalState = new User();
+        originalState.setId(user.getId());
+        originalState.setPasswordHash(user.getPasswordHash());
+        originalState.setFailedLoginCount(user.getFailedLoginCount());
+        originalState.setStatus(user.getStatus());
+        originalState.setLastLoginAt(user.getLastLoginAt());
+        originalState.setUpdatedAt(user.getUpdatedAt());
+        
+        return dualMasterWriteService.writeWithDualWrite(
+            // Primary: JPA Repository 사용
+            () -> {
+                user.setUpdatedAt(LocalDateTime.now());
+                return userRepository.save(user);
+            },
+            
+            // Secondary: JdbcTemplate 사용
+            (jdbcTemplate, updatedUser) -> {
+                String updateUserSql = "UPDATE users SET password_hash = :passwordHash, " +
+                                     "failed_login_count = :failedLoginCount, status = :status, " +
+                                     "last_login_at = :lastLoginAt, updated_at = :updatedAt " +
+                                     "WHERE id = :id";
+                
+                Map<String, Object> updateParams = new HashMap<>();
+                updateParams.put("id", updatedUser.getId());
+                updateParams.put("passwordHash", updatedUser.getPasswordHash());
+                updateParams.put("failedLoginCount", updatedUser.getFailedLoginCount() != null ? updatedUser.getFailedLoginCount() : 0);
+                updateParams.put("status", updatedUser.getStatus() != null ? updatedUser.getStatus().name() : "ACTIVE");
+                updateParams.put("lastLoginAt", updatedUser.getLastLoginAt());
+                updateParams.put("updatedAt", LocalDateTime.now());
+                
+                secondaryNamedParameterJdbcTemplate.update(updateUserSql, updateParams);
+                return null;
+            },
+            
+            // 보상 트랜잭션: Primary에서 원래 상태로 복구
+            (updatedUser) -> {
+                if (updatedUser != null) {
+                    user.setPasswordHash(originalState.getPasswordHash());
+                    user.setFailedLoginCount(originalState.getFailedLoginCount());
+                    user.setStatus(originalState.getStatus());
+                    user.setLastLoginAt(originalState.getLastLoginAt());
+                    user.setUpdatedAt(originalState.getUpdatedAt());
+                    userRepository.save(user);
+                }
+                return null;
+            },
+            "User"  // 엔티티 타입 (Recovery Queue 발행용)
+        );
     }
     
     /**

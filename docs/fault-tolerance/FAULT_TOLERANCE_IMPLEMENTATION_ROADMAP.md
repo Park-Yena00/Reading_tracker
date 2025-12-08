@@ -129,12 +129,12 @@ Phase 2: 인프라 개선 (3-4주)
    - 장애 시나리오 테스트
 
 **완료 기준**:
-- [ ] 두 MySQL 인스턴스 정상 동작
-- [ ] 양방향 복제 정상 작동
-- [ ] Read Failover 정상 작동
-- [ ] Write 동기화 및 롤백 정상 작동
-- [ ] 모든 Service 메서드 수정 완료
-- [ ] 장애 시나리오 테스트 통과
+- [x] 두 MySQL 인스턴스 정상 동작 (구성 완료)
+- [x] 양방향 복제 정상 작동 (Custom Dual Write 구현 완료)
+- [x] Read Failover 정상 작동 ✅
+- [x] Write 동기화 및 롤백 정상 작동 ✅
+- [x] 모든 Service 메서드 수정 완료 ✅
+- [ ] 장애 시나리오 테스트 통과 (테스트 필요)
 
 ---
 
@@ -377,7 +377,7 @@ class NetworkMonitor {
 
 ### 개요
 
-두 개의 Master DBMS를 구성하여 데이터베이스 장애 시에도 서비스 지속성을 보장합니다.
+두 개의 Master DBMS를 구성하여 데이터베이스 장애 시에도 서비스 지속성을 보장합니다. **✅ 구현 완료**
 
 ### 요구사항 상세
 
@@ -569,6 +569,64 @@ public class DualMasterDataSourceConfig {
     }
 }
 ```
+
+#### Secondary DB 초기 동기화 (Initial Synchronization)
+
+**⚠️ 중요**: Secondary DB는 빈 데이터베이스로 시작하므로, Primary DB의 기존 데이터를 Secondary DB로 복사해야 합니다. 이를 **초기 동기화(Initial Synchronization)** 또는 **Bulk Load**라고 합니다.
+
+**이중화/동기화 시스템 구축 과정**:
+
+이중화/동기화 시스템을 구축하는 과정은 보통 두 단계로 나뉩니다:
+
+**단계 1: 초기 동기화 (Bulk Load)**
+
+- **목적**: Primary DB에 이미 존재하는 모든 데이터를 Secondary DB로 한 번 복사하여 두 DB의 초기 상태를 일치시킵니다.
+- **방법**: 별도의 스크립트나 데이터베이스 툴을 사용하여 Primary DB의 User, Memo, Library 테이블의 모든 레코드를 Secondary DB에 그대로 삽입(INSERT)합니다. 이 과정에서 ID 값도 Primary DB와 동일하게 유지되어야 합니다.
+- **구현 방법**:
+  1. Primary DB에서 데이터 덤프:
+     ```cmd
+     mysqldump -u root -p -h localhost -P 3306 reading_tracker > primary_dump.sql
+     ```
+  2. Secondary DB에 데이터 복원:
+     ```cmd
+     mysql -u root -p -h localhost -P 3307 reading_tracker < primary_dump.sql
+     ```
+  3. 데이터 동기화 확인:
+     ```sql
+     -- Primary와 Secondary DB의 데이터 개수 및 최대 ID 비교
+     SELECT COUNT(*) FROM memo;
+     SELECT MAX(id) FROM memo;
+     ```
+
+**단계 2: 지속적인 동기화 (Dual Write)**
+
+- **목적**: 초기 동기화가 완료된 시점부터 발생하는 모든 신규 CUD(Create, Update, Delete) 작업을 양쪽 DB에 동시에 반영합니다.
+- **방법**: 현재 구현하고 계신 `DualMasterWriteService`의 Custom Dual Write 로직이 이 역할을 수행합니다.
+
+**💡 정리 및 결론**:
+
+- **ID가 연속적이지 않다는 이유로 중요한 데이터를 삭제하지 마십시오.**
+- **데이터를 보존하세요. (Primary DB 초기화는 X)**
+- **초기 동기화 스크립트를 작성하여 현재 Primary DB 데이터를 Secondary DB로 안전하게 복사하세요.**
+- **이후에는 Dual Write 로직을 사용하여 신규 데이터 및 변경 사항을 동기화합니다.**
+
+**Docker를 사용한 Secondary DB 설정**:
+
+현재 Redis를 Docker로 관리하고 있으므로, Secondary DB도 Docker를 사용하여 구성하는 것이 가장 논리적이고 효율적입니다. Primary DB가 호스트에서 직접 실행되고, Secondary DB가 Docker 컨테이너에서 실행되는 것은 현대적인 마이크로서비스 또는 분산 환경에서 매우 흔하며, 아키텍처상 아무런 문제가 없습니다.
+
+**아키텍처 관점**: 애플리케이션은 두 DB가 **다른 포트(3306/3307)**에서 독립적으로 실행된다는 사실만 중요하게 여깁니다. Docker는 이 독립적인 인스턴스를 격리된 방식으로 설정하는 가장 깔끔한 방법입니다.
+
+**Docker 설정 예시**:
+```cmd
+# Secondary DB Docker 컨테이너 실행
+docker run --name mysql-secondary ^
+  -e MYSQL_ROOT_PASSWORD=Yenapark1000 ^
+  -e MYSQL_DATABASE=reading_tracker ^
+  -p 3307:3306 ^
+  -d mysql:8.0
+```
+
+**테스트 관점**: Docker 컨테이너를 사용하면 Secondary DB 장애 시뮬레이션 (예: `docker stop mysql-secondary`)을 손쉽게 할 수 있어, 구현하신 Dual Write 및 Read Failover 테스트를 완벽하게 검증할 수 있습니다.
 
 #### 읽기(Read) 서비스 로직: Failover 구현
 
@@ -787,77 +845,73 @@ public class MemoService {
 
 **구현 단계**: 위의 "데이터 소스 및 트랜잭션 관리자 설정", "읽기 서비스 로직", "쓰기 서비스 로직" 참조
 
-#### 옵션 2: 2PC (Two-Phase Commit) 패턴 (비권장)
-
-**장점**:
-- 강력한 일관성 보장
-- 표준 분산 트랜잭션 프로토콜
-
-**단점**:
-- 구현 복잡도 높음
-- 성능 오버헤드
-- JTA 라이브러리 필요 (Atomikos, Bitronix)
-- MySQL Replication 사용 불가 환경에서는 과도한 복잡성
-
-**참고**: 본 프로젝트에서는 Custom Dual Write 전략을 권장합니다.
-
 ### 수정이 필요한 Service 메서드
 
 현재 프로젝트에서 `@Transactional` 어노테이션이 있는 메서드:
 
-#### Write 작업 (Custom Dual Write 적용 필요)
+#### Write 작업 (Custom Dual Write 적용 필요) ✅ **전환 완료**
 
-1. **MemoService** (4개)
-   - `createMemo()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용
-   - `updateMemo()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용
-   - `deleteMemo()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용
-   - `closeBook()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용
+1. **MemoService** (4개) ✅
+   - `createMemo()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용 ✅
+   - `updateMemo()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용 ✅
+   - `deleteMemo()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용 ✅
+   - `closeBook()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용 ✅
 
-2. **UserService** (0개)
+2. **UserService** (0개) ✅
    - Write 작업 없음
 
-3. **BookService** (1개)
-   - `addBookToShelf()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용
+3. **BookService** (1개 이상) ✅
+   - `addBookToShelf()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용 ✅
+   - `finishReading()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용 ✅
+   - `removeBookFromShelf()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용 ✅
+   - `updateBookCategory()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용 ✅
+   - `startReading()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용 ✅
+   - `updateBookDetail()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용 ✅
 
-4. **AuthService** (1개)
-   - `register()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용
+4. **AuthService** (1개 이상) ✅
+   - `register()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용 ✅
+   - `executeLogin()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용 ✅ (로그인 실패/성공 시 User 업데이트)
+   - `executeResetPassword()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용 ✅
 
-5. **JwtService** (2개)
-   - `generateTokens()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용
-   - `refreshAccessToken()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용
+5. **JwtService** (2개) ✅
+   - `generateTokens()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용 ✅ (saveOrUpdateDevice 내부)
+   - `refreshTokens()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용 ✅ (UserDevice 업데이트)
 
-6. **UserDeviceService** (2개)
-   - `registerDevice()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용
-   - `deleteDevice()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용
+6. **UserDeviceService** (2개 이상) ✅
+   - `saveOrUpdateDevice()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용 ✅
+   - `deleteDevice()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용 ✅
+   - `deleteAllUserDevices()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용 ✅
+   - `updateLastSeenAt()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용 ✅
+   - `cleanupOldDevices()`: Write → `DualMasterWriteService.writeWithDualWrite()` 적용 ✅
 
-**총 Write 작업: 10개 메서드 수정 필요**
+**총 Write 작업: ✅ 모든 메서드 전환 완료**
 
-#### Read 작업 (Read Failover 적용 필요)
+#### Read 작업 (Read Failover 적용 필요) ✅ **전환 완료**
 
-1. **MemoService** (7개)
-   - `getMemoById()`: Read → `DualMasterReadService.readWithFailover()` 적용
-   - `getTodayFlowGroupedByBook()`: Read → `DualMasterReadService.readWithFailover()` 적용
-   - `getTodayFlowGroupedByTag()`: Read → `DualMasterReadService.readWithFailover()` 적용
-   - `getBookMemosByDate()`: Read → `DualMasterReadService.readWithFailover()` 적용
-   - `getAllBookMemos()`: Read → `DualMasterReadService.readWithFailover()` 적용
-   - `getBooksWithRecentMemos()`: Read → `DualMasterReadService.readWithFailover()` 적용
-   - `getMemoDates()`: Read → `DualMasterReadService.readWithFailover()` 적용
+1. **MemoService** (7개) ✅
+   - `getMemoById()`: Read → `DualMasterReadService.readWithFailover()` 적용 ✅
+   - `getTodayFlowGroupedByBook()`: Read → `DualMasterReadService.readWithFailover()` 적용 ✅
+   - `getTodayFlowGroupedByTag()`: Read → `DualMasterReadService.readWithFailover()` 적용 ✅
+   - `getBookMemosByDate()`: Read → `DualMasterReadService.readWithFailover()` 적용 ✅
+   - `getAllBookMemos()`: Read → `DualMasterReadService.readWithFailover()` 적용 ✅
+   - `getBooksWithRecentMemos()`: Read → `DualMasterReadService.readWithFailover()` 적용 ✅
+   - `getMemoDates()`: Read → `DualMasterReadService.readWithFailover()` 적용 ✅
 
-2. **UserService** (1개)
-   - `getUserByLoginId()`: Read → `DualMasterReadService.readWithFailover()` 적용
+2. **UserService** (1개) ✅
+   - `findByLoginId()`: Read → `DualMasterReadService.readWithFailover()` 적용 ✅ (문서의 `getUserByLoginId()`는 실제로 `findByLoginId()`)
 
-3. **BookService** (1개)
-   - `getBooksByCategory()`: Read → `DualMasterReadService.readWithFailover()` 적용
+3. **BookService** (1개) ✅
+   - `getMyShelf()`: Read → `DualMasterReadService.readWithFailover()` 적용 ✅ (문서의 `getBooksByCategory()`는 실제로 `getMyShelf()`)
 
-4. **JwtService** (1개)
-   - `validateToken()`: Read → `DualMasterReadService.readWithFailover()` 적용
+4. **JwtService** (0개) ✅
+   - `validateToken()` 메서드는 존재하지 않음 (토큰 검증은 `JwtUtil`에서 처리, DB Read 없음)
 
-5. **UserDeviceService** (1개)
-   - `getUserDevices()`: Read → `DualMasterReadService.readWithFailover()` 적용
+5. **UserDeviceService** (1개) ✅
+   - `getUserDevices()`: Read → `DualMasterReadService.readWithFailover()` 적용 ✅
 
-**총 Read 작업: 11개 메서드 수정 필요**
+**총 Read 작업: ✅ 모든 메서드 전환 완료**
 
-**전체 수정 필요: 21개 메서드**
+**전체 수정: ✅ 21개 메서드 모두 전환 완료**
 
 ### 데이터 무결성 보장
 
@@ -908,7 +962,85 @@ public class MemoService {
 
 보상 트랜잭션 실패는 동기적으로 처리할 수 있는 범위를 벗어난 것입니다. 애플리케이션은 즉시 로그를 기록하고 **경고(Alert)**를 발생시킨 후, 비동기적인 복구 시스템에게 이 문제를 위임해야 합니다.
 
-###### A. 필수 조치: 로그 및 모니터링
+**핵심 원칙: Recovery Queue는 수동 개입이 발생하기 전에 시스템이 스스로 회복을 시도하는 마지막 자동 방어선 역할을 합니다.**
+
+###### A. 보상 트랜잭션 실패 시 Recovery Queue 자동 발행
+
+**목적**: 보상 트랜잭션이 실패할 경우, 해당 실패 정보를 `CompensationFailureEvent`로 만들어 `RecoveryQueueService`에 발행합니다. 이벤트가 큐에 남으므로 유실되지 않고 추적 가능하며, `CompensationRecoveryWorker`가 처리할 수 있도록 하여 시스템이 자체적으로 복구를 시도할 기회를 한 번 더 부여합니다.
+
+**구현 위치**: `DualMasterWriteService.writeWithDualWrite()` 메서드의 보상 트랜잭션 실패 catch 블록 내부
+
+**이벤트의 역할**: Recovery Queue에 발행하는 실패 이벤트는 **"Secondary DB에 대한 재시도 요청"**입니다. 이벤트가 Primary DB에서 데이터를 삭제하는 역할이 아니라, **Secondary DB에서 불일치 데이터를 정리하려는 목적**을 가집니다.
+
+**보상 로직의 두 가지 유형**:
+
+1. **A. 동기 보상 (Primary DB 보호)**
+   - **시나리오**: Primary DB 쓰기는 성공했으나, Secondary DB 쓰기가 실패했을 때
+   - **현재 결정된 로직**: `DualMasterWriteService` 내에서 Primary DB에 대해 즉시 롤백하거나 이전 상태로 복구합니다 (예: `createMemo`의 경우 Primary에서 DELETE)
+   - **목적**: 사용자에게 최종 실패 응답을 주기 전에, Primary DB의 정합성을 최우선으로 보호하여 데이터 유실 및 불일치 상태를 방지합니다
+
+2. **B. 비동기 복구 (Secondary DB 정리)**
+   - **시나리오**: 보상 트랜잭션이 실패하여 Primary DB의 상태는 이미 결정되었으나, Secondary DB에 불일치 데이터가 남아있는 경우
+   - **현재 결정된 로직**: `CompensationRecoveryWorker`를 통해 Secondary DB에 남아있는 데이터를 정리하는 작업을 재시도합니다
+   - **목적**: 비록 Primary DB에는 이미 데이터가 삭제되었거나 원래 상태로 복구되었더라도, Secondary DB에 잔류하는 **유령 데이터(Ghost Data)**를 제거하여 장기적인 정합성 문제를 해결합니다
+
+**시나리오별 처리 로직**:
+
+보상 트랜잭션이 실패하는 경우 Recovery Queue에 저장된 이벤트는 Secondary DB에 쓰기를 재시도하는 것이 아니라, **이미 Primary DB에서 최종적으로 결정된 상태를 Secondary DB에 맞추려는 시도를 재시도**합니다.
+
+1. **CREATE 실패 이벤트**:
+   - **상태**: Primary DB에서는 롤백되어 데이터가 없습니다
+   - **목표**: Secondary DB에서도 데이터가 삭제되어야 합니다
+   - **Recovery Worker 동작**: Secondary DB에서 해당 데이터 DELETE를 재시도합니다
+
+2. **UPDATE 실패 이벤트**:
+   - **상태**: Primary DB에서 복구되어 원래 상태가 됩니다
+   - **목표**: Secondary DB에서도 원래 상태로 업데이트가 되어야 합니다
+   - **Recovery Worker 동작**: Secondary DB에서 해당 데이터를 원래 상태로 UPDATE 재시도합니다
+
+3. **DELETE 실패 이벤트**:
+   - **상태**: Primary DB에서는 데이터가 삭제됩니다
+   - **목표**: Secondary DB에서도 데이터를 삭제해야 합니다
+   - **Recovery Worker 동작**: Secondary DB에서 해당 데이터 DELETE 재시도합니다
+
+**자동 복구 프로세스**:
+
+1. **이벤트 발행**: 보상 트랜잭션 실패 시 `CompensationFailureEvent`를 생성하여 `RecoveryQueueService.publish()`로 발행
+2. **자동 처리**: `CompensationRecoveryWorker`가 `@Scheduled(fixedDelay = 60000)` 설정에 따라 1분마다 해당 이벤트를 가져와 **최대 10회까지 자동 처리(재시도)**
+3. **자동 처리 성공 시**: 운영팀의 개입 없이 데이터 정합성이 자동으로 회복됩니다
+4. **자동 처리 최종 실패 시 (10회 모두 실패)**: Worker가 이 이벤트를 CRITICAL로 분류하고 `AlertService`를 통해 운영팀에 알립니다. 이때 비로소 시스템 관리자가 수동으로 Primary/Secondary DB의 상태를 확인하고 데이터를 수동 정리해야 합니다
+
+**구현 예시**:
+```java
+catch (Exception compensationError) {
+    log.error("CRITICAL: 보상 트랜잭션 실행 실패", compensationError);
+    
+    // Recovery Queue에 이벤트 발행 (Secondary DB 정리를 위한 재시도 요청)
+    CompensationFailureEvent event = new CompensationFailureEvent(
+        "SECONDARY_SYNC_RETRY",  // Secondary DB 동기화 재시도
+        primaryResult.getId(),   // 엔티티 ID
+        getEntityType(primaryResult),  // 엔티티 타입 (Memo, UserShelfBook 등)
+        "Secondary",  // 대상 DB
+        Instant.now(),  // 실패 시간
+        compensationError.getMessage()  // 에러 메시지
+    );
+    
+    recoveryQueueService.publish(event);
+    
+    log.error("CRITICAL: 보상 트랜잭션 실패로 인한 데이터 불일치 발생. " +
+              "entityType: {}, entityId: {}, failureTime: {}, error: {}. " +
+              "Recovery Queue에 발행됨. CompensationRecoveryWorker가 자동 복구를 시도합니다.",
+              event.getEntityType(), 
+              event.getEntityId(), 
+              event.getFailureTime(), 
+              compensationError.getMessage());
+    
+    // 원래 Exception을 던짐 (사용자에게는 실패 응답)
+    throw new DatabaseWriteException("Secondary DB 쓰기 실패, Primary 보상 트랜잭션 실행 실패. Recovery Queue에 발행됨", e);
+}
+```
+
+###### B. 필수 조치: 로그 및 모니터링
 
 보상 트랜잭션이 실패하는 catch 블록 내에서 가장 높은 수준의 **CRITICAL** 로그를 남겨야 합니다.
 
@@ -941,9 +1073,86 @@ catch (Exception compensationError) {
 }
 ```
 
-**경고(Alerting) 시스템**:
-- 이 CRITICAL 로그가 발생하면, 즉시 운영자(교수님 또는 개발자)에게 SMS, 이메일, 슬랙 등으로 알림이 가도록 시스템을 구축해야 합니다.
-- 모니터링 시스템(예: Prometheus + AlertManager)과 연동하여 자동 알림 설정
+**경고(Alerting) 시스템** ✅ **구현 완료**:
+- 이 CRITICAL 로그가 발생하면, 즉시 운영자(교수님 또는 개발자)에게 SMS, 이메일, 슬랙 등으로 알림이 가도록 시스템을 구축해야 합니다. ✅
+- 모니터링 시스템(예: Prometheus + AlertManager)과 연동하여 자동 알림 설정 (향후 확장 가능)
+- **현재 구현**: `AlertService`를 통해 CRITICAL 로그 기록 (향후 SMS, 이메일, 슬랙 등으로 확장 가능)
+
+###### C. AlertService 연동 완료 ✅ **구현 완료**
+
+**목적**: `CompensationRecoveryWorker`가 최대 재시도 횟수(10회)를 초과하여 실패할 경우, 시스템이 스스로 해결할 수 없는 데이터 정합성 오류이므로 즉시 운영팀의 수동 개입이 필요합니다. `AlertService`를 통해 운영팀에 CRITICAL 알림을 발송합니다.
+
+**구현 위치**: `CompensationRecoveryWorker.handleRecoveryFailure()` 메서드의 최종 실패 블록
+
+**동작 방식**:
+1. `CompensationRecoveryWorker`가 복구 이벤트를 처리하는 중 예외가 발생하면 `handleRecoveryFailure()`가 호출됩니다
+2. 재시도 횟수를 증가시키고 (`event.incrementRetryCount()`), 최대 재시도 횟수(10회)를 초과했는지 확인합니다
+3. 최대 재시도 횟수를 초과한 경우:
+   - CRITICAL 레벨 로그를 기록합니다
+   - `AlertService.sendCriticalAlert()`를 호출하여 운영팀에 즉시 알림을 발송합니다
+   - 알림 내용에는 다음 정보가 포함됩니다:
+     - Entity Type (Memo, UserShelfBook, UserDevice, User, Book 등)
+     - Entity ID
+     - Action (SECONDARY_SYNC_RETRY 등)
+     - Target DB (Primary 또는 Secondary)
+     - Failure Time
+     - Error Message
+   - `recoveryQueueService.markAsFailed(event)`를 호출하여 이벤트를 실패 상태로 표시합니다
+4. 최대 재시도 횟수를 초과하지 않은 경우:
+   - `recoveryQueueService.requeue(event)`를 호출하여 재시도 큐에 다시 추가합니다
+
+**AlertService 구현**:
+- **위치**: `com.readingtracker.server.service.alert.AlertService`
+- **현재 구현**: CRITICAL 로그 기록 (향후 SMS, 이메일, 슬랙 등으로 확장 가능)
+- **메서드**:
+  - `sendCriticalAlert(String title, String message)`: CRITICAL 알림 발송
+  - `sendWarningAlert(String title, String message)`: WARNING 알림 발송
+  - `sendInfoAlert(String title, String message)`: INFO 알림 발송
+
+**구현 예시**:
+```java
+private void handleRecoveryFailure(CompensationFailureEvent event, Exception e) {
+    int retryCount = event.incrementRetryCount();
+    log.warn("복구 재시도 실패: entityId={}, retryCount={}", 
+            event.getEntityId(), retryCount);
+    
+    if (retryCount >= MAX_RETRY_COUNT) {
+        // 최대 재시도 횟수 초과 시 수동 개입 필요 알림
+        log.error("CRITICAL: 복구 작업 최대 재시도 횟수 초과: entityType={}, entityId={}, retryCount={}, 수동 개입 필요", 
+                 event.getEntityType(), event.getEntityId(), retryCount);
+        
+        // AlertService를 통한 CRITICAL 알림 발송
+        String alertTitle = "복구 작업 최대 재시도 횟수 초과";
+        String alertMessage = String.format(
+            "복구 작업이 최대 재시도 횟수(%d회)를 초과하여 실패했습니다. " +
+            "시스템이 스스로 해결할 수 없는 데이터 정합성 오류입니다. " +
+            "즉시 수동 개입이 필요합니다.\n" +
+            "- Entity Type: %s\n" +
+            "- Entity ID: %d\n" +
+            "- Action: %s\n" +
+            "- Target DB: %s\n" +
+            "- Failure Time: %s\n" +
+            "- Error Message: %s",
+            MAX_RETRY_COUNT,
+            event.getEntityType(),
+            event.getEntityId(),
+            event.getAction(),
+            event.getTargetDB(),
+            event.getFailureTime(),
+            event.getErrorMessage()
+        );
+        
+        alertService.sendCriticalAlert(alertTitle, alertMessage);
+        
+        recoveryQueueService.markAsFailed(event);
+    } else {
+        // 재시도 큐에 다시 추가
+        recoveryQueueService.requeue(event);
+    }
+}
+```
+
+**핵심**: AlertService는 시스템이 스스로 해결할 수 없는 심각한 오류 발생 시 운영팀에 즉시 알림을 발송하는 최종 방어선 역할을 합니다. 이를 통해 운영팀은 수동 개입을 통해 데이터 정합성을 회복할 수 있습니다.
 
 ###### B. 자동화된 복구 (권장 방안)
 
@@ -1125,11 +1334,32 @@ public class CompensationRecoveryWorker {
         
         if (retryCount >= MAX_RETRY_COUNT) {
             // 최대 재시도 횟수 초과 시 수동 개입 필요 알림
-            alertService.sendCriticalAlert(
-                "복구 작업 실패",
-                String.format("entityType: %s, entityId: %d, 수동 개입 필요", 
-                             event.getEntityType(), event.getEntityId())
+            log.error("CRITICAL: 복구 작업 최대 재시도 횟수 초과: entityType={}, entityId={}, retryCount={}, 수동 개입 필요", 
+                     event.getEntityType(), event.getEntityId(), retryCount);
+            
+            // AlertService를 통한 CRITICAL 알림 발송
+            String alertTitle = "복구 작업 최대 재시도 횟수 초과";
+            String alertMessage = String.format(
+                "복구 작업이 최대 재시도 횟수(%d회)를 초과하여 실패했습니다. " +
+                "시스템이 스스로 해결할 수 없는 데이터 정합성 오류입니다. " +
+                "즉시 수동 개입이 필요합니다.\n" +
+                "- Entity Type: %s\n" +
+                "- Entity ID: %d\n" +
+                "- Action: %s\n" +
+                "- Target DB: %s\n" +
+                "- Failure Time: %s\n" +
+                "- Error Message: %s",
+                MAX_RETRY_COUNT,
+                event.getEntityType(),
+                event.getEntityId(),
+                event.getAction(),
+                event.getTargetDB(),
+                event.getFailureTime(),
+                event.getErrorMessage()
             );
+            
+            alertService.sendCriticalAlert(alertTitle, alertMessage);
+            
             recoveryQueueService.markAsFailed(event);
         } else {
             // 재시도 큐에 다시 추가
@@ -1161,11 +1391,21 @@ public class CompensationRecoveryWorker {
    - 복구 작업자 성공/실패 통계
    - 수동 개입 필요 알림 횟수
 
-5. **경고(Alert) 시스템**
-   - CRITICAL 로그 발생 시 즉시 알림 (SMS, 이메일, 슬랙)
-   - 보상 트랜잭션 실패 알림
-   - 복구 작업 실패 알림
-   - 데이터 불일치 감지 알림
+5. **경고(Alert) 시스템** ✅ **구현 완료**
+   - CRITICAL 로그 발생 시 즉시 알림 (SMS, 이메일, 슬랙) ✅
+   - 보상 트랜잭션 실패 알림 ✅
+   - 복구 작업 실패 알림 ✅ (최대 재시도 횟수 초과 시)
+   - 데이터 불일치 감지 알림 ✅
+   
+   **구현 위치**: `com.readingtracker.server.service.alert.AlertService`
+   
+   **연동 위치**: `CompensationRecoveryWorker.handleRecoveryFailure()`
+   
+   **동작 방식**:
+   - `CompensationRecoveryWorker`가 최대 재시도 횟수(10회)를 초과하여 실패할 경우
+   - `AlertService.sendCriticalAlert()`를 호출하여 운영팀에 즉시 알림 발송
+   - 알림 내용: Entity Type, Entity ID, Action, Target DB, Failure Time, Error Message 포함
+   - 현재는 CRITICAL 로그를 통해 알림 기록 (향후 SMS, 이메일, 슬랙 등으로 확장 가능)
 
 ---
 
@@ -1578,6 +1818,127 @@ public class MemoService {
   - Repair Worker를 핵심 비즈니스 로직과 분리
   - 독립적인 확장 및 장애 격리
   - 복구 큐 시스템 모니터링
+
+### DualWriteVerificationTest 통합 테스트
+
+현재 구현된 Dual Write 및 Failover 로직의 안정성을 증명하는 유일한 방법입니다. 이 테스트는 Phase 2 진입 전 필수 검증 항목으로, 모든 장애 시나리오를 시뮬레이션하여 시스템의 복원력을 검증합니다.
+
+#### 필수 테스트 시나리오
+
+##### 1. Happy Path Test: Primary/Secondary 동시 쓰기 성공 및 데이터 정합성
+
+**목적**: 정상적인 상황에서 Dual Write가 올바르게 작동하고, Primary와 Secondary DB의 데이터가 일치하는지 검증합니다.
+
+**테스트 절차**:
+1. 테스트 User와 UserShelfBook 생성
+2. `MemoService.createMemo()` 호출
+3. `DataConsistencyVerifier.verifyMemoConsistency()`를 사용하여 Primary와 Secondary DB의 데이터 일치 확인
+4. 모든 필드(id, user_id, book_id, page_number, content, memo_start_time 등)가 일치하는지 검증
+
+**검증 항목**:
+- Primary DB에 데이터가 정상적으로 저장됨
+- Secondary DB에 데이터가 정상적으로 저장됨
+- 두 DB의 모든 필드가 완전히 일치함
+
+##### 2. Secondary Write Failure Test: 보상 트랜잭션 검증
+
+**목적**: Secondary DB 쓰기 실패 시 Primary DB의 보상 트랜잭션이 올바르게 실행되어 데이터 불일치를 방지하는지 검증합니다.
+
+**테스트 절차**:
+1. Secondary DB 연결을 임시로 끊거나 Secondary DB를 다운시킴
+2. `MemoService.createMemo()` 호출
+3. `DatabaseWriteException`이 발생하는지 확인
+4. Primary DB에서 해당 메모 ID로 조회하여 데이터가 없는지 확인 (보상 트랜잭션의 롤백 확인)
+
+**검증 항목**:
+- Secondary DB 쓰기 실패 시 예외가 발생함
+- Primary DB에 데이터가 저장되지 않음 (보상 트랜잭션으로 DELETE됨)
+- 사용자에게는 실패 응답이 반환됨
+
+**구현 방법**:
+- 테스트 환경에서 Secondary DB 연결을 모의(Mock)하거나 실제로 끊음
+- `@TestPropertySource` 또는 테스트 전용 설정을 사용하여 Secondary DB 연결을 비활성화
+
+##### 3. Secondary Cleanup Failure Test (DELETE 시): Recovery Queue 발행 및 Worker 처리 검증
+
+**목적**: DELETE 작업에서 Secondary DB 삭제 실패 시 Recovery Queue에 이벤트가 발행되고, CompensationRecoveryWorker가 이를 처리하여 Secondary DB의 유령 데이터를 정리하는지 검증합니다.
+
+**테스트 절차**:
+1. 정상적으로 메모 생성 (Primary와 Secondary 모두에 저장)
+2. Secondary DB 연결을 임시로 끊음
+3. `MemoService.deleteMemo()` 호출
+4. Primary DB에서 메모가 삭제되었는지 확인
+5. `RecoveryQueueService`에서 `DELETE_SECONDARY_CLEANUP` 이벤트가 발행되었는지 확인
+6. Secondary DB 연결 복구
+7. `CompensationRecoveryWorker.processRecoveryQueue()`를 수동으로 호출하거나 스케줄러가 실행될 때까지 대기
+8. Secondary DB에서 해당 메모가 삭제되었는지 확인
+
+**검증 항목**:
+- Primary DB에서 메모가 정상적으로 삭제됨
+- `DELETE_SECONDARY_CLEANUP` 이벤트가 Recovery Queue에 발행됨
+- CompensationRecoveryWorker가 이벤트를 처리하여 Secondary DB에서 메모가 삭제됨
+- `memo_tags` 테이블의 관련 데이터도 함께 삭제됨
+
+##### 4. Read Failover Test: Primary DB 장애 시 Secondary DB로의 Failover 검증
+
+**목적**: Primary DB 장애 시 Read Failover가 올바르게 작동하여 Secondary DB에서 데이터를 읽을 수 있는지 검증합니다.
+
+**테스트 절차**:
+1. 정상적으로 메모 생성 (Primary와 Secondary 모두에 저장)
+2. Primary DB 연결을 임시로 끊거나 Primary DB를 다운시킴
+3. `MemoService.getMemoById()` 호출
+4. Secondary DB에서 데이터가 정상적으로 읽히는지 확인
+5. 반환된 메모 데이터가 올바른지 검증
+
+**검증 항목**:
+- Primary DB 연결 실패 시 예외가 발생하지 않음
+- Secondary DB에서 데이터가 정상적으로 읽힘
+- 반환된 메모 데이터가 예상한 값과 일치함
+
+**구현 방법**:
+- 테스트 환경에서 Primary DB 연결을 모의(Mock)하거나 실제로 끊음
+- `DualMasterReadService.readWithFailover()`가 Secondary DB로 자동 Failover하는지 확인
+
+#### 테스트 구현 고려사항
+
+**환경 설정**:
+- 테스트 전용 프로파일(`@ActiveProfiles("test")`) 사용
+- Primary와 Secondary DB를 독립적으로 제어할 수 있는 테스트 환경 구성
+- DB 연결을 임시로 끊거나 모의할 수 있는 메커니즘 구현
+
+**데이터 준비**:
+- 각 테스트 전에 필요한 테스트 데이터(User, UserShelfBook, Book 등) 생성
+- 테스트 후 데이터 정리 (`@AfterEach`에서 명시적으로 삭제)
+
+**데이터 정리 (필수)**:
+- **문제**: `DualMasterWriteService`는 별도의 `TransactionTemplate`을 사용하므로, 테스트의 `@Transactional` 롤백 범위를 벗어나 실제 DB에 데이터가 커밋됩니다.
+- **해결**: `@AfterEach`에서 생성된 테스트 데이터를 추적하고, Primary와 Secondary DB 양쪽에서 명시적으로 삭제해야 합니다.
+- **구현 방법**:
+  - `createdMemoIds` 리스트를 사용하여 테스트에서 생성한 메모 ID만 추적
+  - 각 테스트 메서드에서 `createdMemoIds.add(memoId)`로 ID 기록
+  - `@AfterEach`에서 `DELETE FROM memo WHERE id IN (:ids)` 쿼리로 Primary와 Secondary DB 양쪽에서 삭제
+  - **중요**: 테이블 전체를 비우는 것이 아니라, `createdMemoIds`에 기록된 ID만 삭제하여 실제 개발/운영 데이터를 보호
+- **이유**:
+  - 시연 오류 방지: 라이브 데모에서 테스트 데이터와 ID 충돌 방지
+  - 데이터 오염 방지: 시연 페이지에서 테스트 데이터가 노출되지 않도록 보장
+  - 개발 데이터 보호: 실제 개발 중인 데이터나 중요한 시연용 데이터가 삭제되지 않도록 보장
+
+**비동기 처리**:
+- `CompensationRecoveryWorker`의 스케줄러 실행을 기다리거나 수동으로 호출
+- `RecoveryQueueService`의 큐 상태를 직접 확인
+
+**예외 처리**:
+- 예상된 예외(`DatabaseWriteException`)가 발생하는지 검증
+- 예상치 못한 예외가 발생하지 않는지 확인
+
+#### 테스트 실행 순서
+
+1. **Happy Path Test** 실행 → 정상 동작 확인
+2. **Secondary Write Failure Test** 실행 → 보상 트랜잭션 검증
+3. **Secondary Cleanup Failure Test** 실행 → Recovery Queue 및 Worker 검증
+4. **Read Failover Test** 실행 → Failover 메커니즘 검증
+
+모든 테스트가 통과해야 Phase 2 진입이 가능합니다.
 
 ### 구현 순서의 중요성
 

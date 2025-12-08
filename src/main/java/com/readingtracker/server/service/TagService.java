@@ -2,7 +2,7 @@ package com.readingtracker.server.service;
 
 import com.readingtracker.dbms.entity.Tag;
 import com.readingtracker.dbms.entity.TagCategory;
-import com.readingtracker.dbms.repository.TagRepository;
+import com.readingtracker.dbms.repository.primary.TagRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;

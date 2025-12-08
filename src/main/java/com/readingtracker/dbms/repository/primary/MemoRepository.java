@@ -1,11 +1,10 @@
-package com.readingtracker.dbms.repository;
+package com.readingtracker.dbms.repository.primary;
 
 import com.readingtracker.dbms.entity.Memo;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
-import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 
@@ -128,16 +127,17 @@ public interface MemoRepository extends JpaRepository<Memo, Long> {
     );
     
     // 특정 사용자의 특정 년/월에 메모가 작성된 날짜 목록 조회 (중복 제거, 캘린더용)
-    // DATE() 함수를 사용하여 LocalDateTime에서 날짜만 추출
-    @Query("SELECT DISTINCT CAST(m.memoStartTime AS date) FROM Memo m " +
+    // 날짜 범위로 조회하여 애플리케이션 레벨에서 날짜만 추출
+    // 문서: ARCHITECTURE.md 준수 - JPQL 사용, 네이티브 쿼리 지양
+    @Query("SELECT m.memoStartTime FROM Memo m " +
            "WHERE m.user.id = :userId " +
-           "AND YEAR(m.memoStartTime) = :year " +
-           "AND MONTH(m.memoStartTime) = :month " +
-           "ORDER BY CAST(m.memoStartTime AS date) ASC")
-    List<LocalDate> findDistinctDatesByUserIdAndYearAndMonth(
+           "AND m.memoStartTime >= :startOfMonth " +
+           "AND m.memoStartTime < :startOfNextMonth " +
+           "ORDER BY m.memoStartTime ASC")
+    List<LocalDateTime> findMemoStartTimesByUserIdAndYearAndMonth(
         @Param("userId") Long userId,
-        @Param("year") int year,
-        @Param("month") int month
+        @Param("startOfMonth") LocalDateTime startOfMonth,
+        @Param("startOfNextMonth") LocalDateTime startOfNextMonth
     );
 }
 

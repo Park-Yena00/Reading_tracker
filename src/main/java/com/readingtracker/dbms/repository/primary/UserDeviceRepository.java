@@ -1,15 +1,13 @@
-package com.readingtracker.dbms.repository;  
+package com.readingtracker.dbms.repository.primary;
 
 import com.readingtracker.dbms.entity.UserDevice;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
-import org.springframework.stereotype.Repository;
 
 import java.util.List;
 import java.util.Optional;
 
-@Repository
 public interface UserDeviceRepository extends JpaRepository<UserDevice, Long> {
     
     Optional<UserDevice> findByUserIdAndDeviceId(Long userId, String deviceId);
@@ -27,6 +25,4 @@ public interface UserDeviceRepository extends JpaRepository<UserDevice, Long> {
     
     List<UserDevice> findByUserIdAndLastSeenAtBefore(Long userId, java.time.LocalDateTime cutoffDate);
 }
-
-
 

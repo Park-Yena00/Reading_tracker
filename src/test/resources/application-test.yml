@@ -1,0 +1,82 @@
+spring:
+  application:
+    name: reading-tracker
+  main:
+    allow-bean-definition-overriding: true
+  
+  # Primary/Secondary DB 설정 (MySQL 이중화)
+  datasource:
+    primary:
+      url: jdbc:mysql://localhost:3306/reading_tracker?useSSL=false&serverTimezone=Asia/Seoul&characterEncoding=UTF-8
+      username: root
+      password: ${PRIMARY_DB_PASSWORD:Yenapark1000}
+      driver-class-name: com.mysql.cj.jdbc.Driver
+      hikari:
+        maximum-pool-size: 10
+        minimum-idle: 5
+    secondary:
+      url: jdbc:mysql://localhost:3307/reading_tracker?useSSL=false&serverTimezone=Asia/Seoul&characterEncoding=UTF-8&allowPublicKeyRetrieval=true
+      username: root
+      password: ${SECONDARY_DB_PASSWORD:Yenapark1000}
+      driver-class-name: com.mysql.cj.jdbc.Driver
+      hikari:
+        maximum-pool-size: 10
+        minimum-idle: 5
+  
+  jpa:
+    hibernate:
+      ddl-auto: none
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQL8Dialect
+  
+  # Redis 설정 (테스트 환경)
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      password:
+      timeout: 2000ms
+      lettuce:
+        pool:
+          max-active: 8
+          max-idle: 8
+          min-idle: 0
+          max-wait: -1ms
+  
+  # Flyway 비활성화 (테스트 환경에서는 마이그레이션 불필요)
+  flyway:
+    enabled: false
+
+server:
+  port: 8080
+
+# JWT 설정 (테스트용)
+jwt:
+  secret: ${JWT_SECRET:testSecretKey1234567890123456789012345678901234567890123456789012345678901234567890}
+  access-token-expiration: 3600000
+  refresh-token-expiration: 604800000
+
+# CORS 설정 (테스트용)
+cors:
+  allowed-origins:
+    - http://localhost:3000
+    - http://localhost:8000
+    - http://127.0.0.1:8000
+    - http://localhost:8080
+  allowed-methods: GET,POST,PUT,DELETE,OPTIONS
+  allowed-headers: "*"
+  allow-credentials: true
+
+# 알라딘 API 설정 (테스트용)
+aladin:
+  api:
+    key: ${ALADIN_API_KEY:ttbdpsk15151102001}
+    base-url: http://www.aladin.co.kr/ttb/api
+
+# 로깅 설정
+logging:
+  level:
+    root: INFO
+    com.readingtracker: DEBUG
+

@@ -112,6 +112,12 @@
             <artifactId>commons-pool2</artifactId>
         </dependency>
         
+        <!-- Jackson JSR310 Module (Java 8 Date/Time 지원) -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jsr310</artifactId>
+        </dependency>
+        
         <!-- OpenAPI/Swagger -->
         <dependency>
             <groupId>org.springdoc</groupId>

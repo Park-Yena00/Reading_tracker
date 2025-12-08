@@ -1,16 +1,14 @@
-package com.readingtracker.dbms.repository;
+package com.readingtracker.dbms.repository.primary;
 
 import com.readingtracker.server.common.constant.BookCategory;
 import com.readingtracker.dbms.entity.UserShelfBook;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
-import org.springframework.stereotype.Repository;
 
 import java.util.List;
 import java.util.Optional;
 
-@Repository
 public interface UserShelfBookRepository extends JpaRepository<UserShelfBook, Long> {
     
     // 특정 사용자의 모든 UserBook 조회
@@ -77,8 +75,4 @@ public interface UserShelfBookRepository extends JpaRepository<UserShelfBook, Lo
     @Query("SELECT ub FROM UserShelfBook ub JOIN FETCH ub.book b WHERE ub.user.id = :userId AND ub.category = :category ORDER BY b.mainGenre ASC")
     List<UserShelfBook> findByUserIdAndCategoryOrderByGenreAsc(@Param("userId") Long userId, @Param("category") BookCategory category);
 }
-
-
-
-
 

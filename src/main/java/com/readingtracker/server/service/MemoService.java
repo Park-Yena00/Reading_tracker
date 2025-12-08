@@ -5,14 +5,16 @@ import com.readingtracker.dbms.entity.Tag;
 import com.readingtracker.dbms.entity.TagCategory;
 import com.readingtracker.dbms.entity.User;
 import com.readingtracker.dbms.entity.UserShelfBook;
-import com.readingtracker.dbms.repository.MemoRepository;
-import com.readingtracker.dbms.repository.UserShelfBookRepository;
+import com.readingtracker.dbms.repository.primary.MemoRepository;
+import com.readingtracker.dbms.repository.primary.UserShelfBookRepository;
 import com.readingtracker.server.common.constant.BookCategory;
 import com.readingtracker.server.dto.responseDTO.BookMemoGroup;
 import com.readingtracker.server.dto.responseDTO.MemoResponse;
 import com.readingtracker.server.dto.responseDTO.TagMemoGroup;
 import com.readingtracker.server.mapper.MemoMapper;
+import com.readingtracker.server.service.write.DualMasterWriteService;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -28,7 +30,7 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 @Service
-@Transactional
+// @Transactional 제거 (Dual Write를 위해)
 public class MemoService {
     
     @Autowired
@@ -40,6 +42,18 @@ public class MemoService {
     @Autowired
     private UserShelfBookRepository userShelfBookRepository;
     
+    @Autowired
+    private DualMasterWriteService dualMasterWriteService;
+    
+    @Autowired
+    private com.readingtracker.server.service.read.DualMasterReadService dualMasterReadService;
+    
+    @Autowired
+    private org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate secondaryNamedParameterJdbcTemplate;
+    
+    @Autowired
+    private com.readingtracker.server.service.recovery.RecoveryQueueService recoveryQueueService;
+    
     /**
      * 메모 작성
      * - 메모 내용 필수 검증
@@ -49,6 +63,8 @@ public class MemoService {
      * 
      * 참고: ARCHITECTURE 원칙에 따라 Entity만 사용합니다.
      * RequestDTO → Entity 변환은 Mapper 계층에서 처리됩니다.
+     * 
+     * Dual Write 적용: Primary는 JPA Repository, Secondary는 JdbcTemplate 사용
      */
     public Memo createMemo(User user, Memo memo) {
         // 1. UserShelfBook 소유권 확인
@@ -65,9 +81,57 @@ public class MemoService {
         // 태그는 Mapper에서 이미 Tag 엔티티 리스트로 변환되어 Entity에 설정됨
         // 추가 검증이 필요한 경우 여기서 수행
         
-        // 3. Memo 엔티티 저장
+        // 3. Memo 엔티티 저장 (Dual Write)
         memo.setUser(user);
-        return memoRepository.save(memo);
+        
+        return dualMasterWriteService.writeWithDualWrite(
+            // Primary: JPA Repository 사용
+            () -> memoRepository.save(memo),
+            
+            // Secondary: JdbcTemplate 사용 (Primary 결과를 받아서 ID 사용)
+            (jdbcTemplate, savedMemo) -> {
+                NamedParameterJdbcTemplate namedTemplate = secondaryNamedParameterJdbcTemplate;
+                
+                // Memo INSERT (Primary에서 생성된 ID 사용)
+                String insertMemoSql = "INSERT INTO memo (id, user_id, book_id, page_number, content, memo_start_time, created_at, updated_at) " +
+                                     "VALUES (:id, :userId, :userShelfBookId, :pageNumber, :content, :memoStartTime, :createdAt, :updatedAt)";
+                
+                LocalDateTime now = LocalDateTime.now();
+                Map<String, Object> memoParams = new java.util.HashMap<>();
+                memoParams.put("id", savedMemo.getId());
+                memoParams.put("userId", savedMemo.getUserId());
+                memoParams.put("userShelfBookId", savedMemo.getUserShelfBookId());
+                memoParams.put("pageNumber", savedMemo.getPageNumber());
+                memoParams.put("content", savedMemo.getContent());
+                memoParams.put("memoStartTime", savedMemo.getMemoStartTime());
+                memoParams.put("createdAt", savedMemo.getCreatedAt() != null ? savedMemo.getCreatedAt() : now);
+                memoParams.put("updatedAt", savedMemo.getUpdatedAt() != null ? savedMemo.getUpdatedAt() : now);
+                
+                namedTemplate.update(insertMemoSql, memoParams);
+                
+                // memo_tags INSERT (태그가 있는 경우)
+                if (savedMemo.getTags() != null && !savedMemo.getTags().isEmpty()) {
+                    String insertMemoTagsSql = "INSERT INTO memo_tags (memo_id, tag_id) VALUES (:memoId, :tagId)";
+                    for (Tag tag : savedMemo.getTags()) {
+                        Map<String, Object> tagParams = new java.util.HashMap<>();
+                        tagParams.put("memoId", savedMemo.getId());
+                        tagParams.put("tagId", tag.getId());
+                        namedTemplate.update(insertMemoTagsSql, tagParams);
+                    }
+                }
+                
+                return null;
+            },
+            
+            // 보상 트랜잭션: Primary에서 DELETE
+            (savedMemo) -> {
+                if (savedMemo != null && savedMemo.getId() != null) {
+                    memoRepository.deleteById(savedMemo.getId());
+                }
+                return null;
+            },
+            "Memo"  // 엔티티 타입 (Recovery Queue 발행용)
+        );
     }
     
     /**
@@ -75,6 +139,8 @@ public class MemoService {
      * 
      * 참고: ARCHITECTURE 원칙에 따라 Entity만 사용합니다.
      * RequestDTO → Entity 변환은 Mapper 계층에서 처리됩니다.
+     * 
+     * Dual Write 적용: Primary는 JPA Repository, Secondary는 JdbcTemplate 사용
      */
     public Memo updateMemo(User user, Long memoId, Memo memo) {
         // 1. 메모 조회 및 소유권 확인
@@ -88,24 +154,88 @@ public class MemoService {
             throw new IllegalArgumentException("권한이 없습니다.");
         }
         
-        // 2. 필드 업데이트 (content와 tags만 수정 가능)
+        // 2. 이전 상태 저장 (보상 트랜잭션용)
+        Memo originalState = new Memo();
+        originalState.setId(existingMemo.getId());
+        originalState.setContent(existingMemo.getContent());
+        originalState.setPageNumber(existingMemo.getPageNumber());
+        originalState.setMemoStartTime(existingMemo.getMemoStartTime());
+        originalState.setUpdatedAt(existingMemo.getUpdatedAt());
+        
+        // 3. 필드 업데이트 (content와 tags만 수정 가능)
         // 참고: pageNumber는 메모 작성 시점의 시작 위치를 나타내는 메타데이터이므로 수정 불가
         // Mapper에서 이미 변환된 Entity의 필드만 업데이트
         // Mapper의 updateMemoFromRequest에서 이미 필드가 업데이트되었으므로 여기서는 저장만 수행
         
-        return memoRepository.save(existingMemo);
+        return dualMasterWriteService.writeWithDualWrite(
+            // Primary: JPA Repository 사용
+            () -> {
+                existingMemo.setContent(memo.getContent());
+                existingMemo.setTags(memo.getTags());
+                existingMemo.setUpdatedAt(LocalDateTime.now());
+                return memoRepository.save(existingMemo);
+            },
+            
+            // Secondary: JdbcTemplate 사용
+            (jdbcTemplate, updatedMemo) -> {
+                NamedParameterJdbcTemplate namedTemplate = secondaryNamedParameterJdbcTemplate;
+                
+                // Memo UPDATE
+                String updateMemoSql = "UPDATE memo SET content = :content, updated_at = :updatedAt WHERE id = :id";
+                Map<String, Object> updateParams = new java.util.HashMap<>();
+                updateParams.put("id", memoId);
+                updateParams.put("content", updatedMemo.getContent());
+                updateParams.put("updatedAt", LocalDateTime.now());
+                namedTemplate.update(updateMemoSql, updateParams);
+                
+                // memo_tags 삭제 후 재삽입
+                String deleteMemoTagsSql = "DELETE FROM memo_tags WHERE memo_id = :memoId";
+                Map<String, Object> deleteParams = new java.util.HashMap<>();
+                deleteParams.put("memoId", memoId);
+                namedTemplate.update(deleteMemoTagsSql, deleteParams);
+                
+                if (updatedMemo.getTags() != null && !updatedMemo.getTags().isEmpty()) {
+                    String insertMemoTagsSql = "INSERT INTO memo_tags (memo_id, tag_id) VALUES (:memoId, :tagId)";
+                    for (Tag tag : updatedMemo.getTags()) {
+                        Map<String, Object> tagParams = new java.util.HashMap<>();
+                        tagParams.put("memoId", memoId);
+                        tagParams.put("tagId", tag.getId());
+                        namedTemplate.update(insertMemoTagsSql, tagParams);
+                    }
+                }
+                
+                return null;
+            },
+            
+            // 보상 트랜잭션: Primary에서 원래 상태로 복구
+            (updatedMemo) -> {
+                if (updatedMemo != null) {
+                    existingMemo.setContent(originalState.getContent());
+                    existingMemo.setUpdatedAt(originalState.getUpdatedAt());
+                    memoRepository.save(existingMemo);
+                }
+                return null;
+            },
+            "Memo"  // 엔티티 타입 (Recovery Queue 발행용)
+        );
     }
     
     /**
      * 메모 조회 (내부 사용)
+     * 
+     * Dual Read 적용: Primary에서 읽기 시도, 실패 시 Secondary로 Failover
      */
     @Transactional(readOnly = true)
     public Memo getMemoById(User user, Long memoId) {
         if (memoId == null) {
             throw new IllegalArgumentException("메모 ID는 필수입니다.");
         }
-        Memo memo = memoRepository.findById(memoId)
-            .orElseThrow(() -> new IllegalArgumentException("메모를 찾을 수 없습니다."));
+        
+        // Dual Read Failover 적용
+        Memo memo = dualMasterReadService.readWithFailover(() -> 
+            memoRepository.findById(memoId)
+                .orElseThrow(() -> new IllegalArgumentException("메모를 찾을 수 없습니다."))
+        );
         
         if (!memo.getUser().getId().equals(user.getId())) {
             throw new IllegalArgumentException("권한이 없습니다.");
@@ -117,6 +247,8 @@ public class MemoService {
     /**
      * 메모 삭제
      * 멱등성 보장: 이미 삭제된 메모에 대해서도 성공 응답을 반환하여 동일한 요청을 여러 번 실행해도 결과가 동일하도록 함
+     * 
+     * Dual Write 적용: Primary는 JPA Repository, Secondary는 JdbcTemplate 사용
      */
     public void deleteMemo(User user, Long memoId) {
         if (memoId == null) {
@@ -133,7 +265,55 @@ public class MemoService {
             throw new IllegalArgumentException("권한이 없습니다.");
         }
         
-        memoRepository.delete(memo);
+        // DELETE는 보상 트랜잭션이 복잡하므로 로깅만 수행
+        dualMasterWriteService.writeWithDualWrite(
+            // Primary: JPA Repository 사용
+            () -> {
+                memoRepository.delete(memo);
+                return null;
+            },
+            
+            // Secondary: JdbcTemplate 사용
+            (jdbcTemplate, result) -> {
+                NamedParameterJdbcTemplate namedTemplate = secondaryNamedParameterJdbcTemplate;
+                
+                // memo_tags 삭제 (CASCADE로 자동 삭제되지만 명시적으로 처리)
+                String deleteMemoTagsSql = "DELETE FROM memo_tags WHERE memo_id = :memoId";
+                Map<String, Object> deleteTagsParams = new java.util.HashMap<>();
+                deleteTagsParams.put("memoId", memoId);
+                namedTemplate.update(deleteMemoTagsSql, deleteTagsParams);
+                
+                // memo 삭제
+                String deleteMemoSql = "DELETE FROM memo WHERE id = :id";
+                Map<String, Object> deleteParams = new java.util.HashMap<>();
+                deleteParams.put("id", memoId);
+                namedTemplate.update(deleteMemoSql, deleteParams);
+                
+                return null;
+            },
+            
+            // 보상 트랜잭션: DELETE의 보상은 복구가 어려우므로 Recovery Queue에 발행
+            (result) -> {
+                // DELETE 보상 트랜잭션은 Primary 복구가 불가능하지만,
+                // Secondary에 유령 데이터가 남을 수 있으므로 Recovery Queue에 발행
+                com.readingtracker.server.service.recovery.CompensationFailureEvent event = 
+                    new com.readingtracker.server.service.recovery.CompensationFailureEvent(
+                        "DELETE_SECONDARY_CLEANUP",
+                        memoId,
+                        "Memo",
+                        "Secondary",
+                        java.time.Instant.now(),
+                        "Primary DELETE 성공 후 Secondary DELETE 실패로 인한 유령 데이터 정리 필요"
+                    );
+                
+                recoveryQueueService.publish(event);
+                org.slf4j.LoggerFactory.getLogger(MemoService.class)
+                    .warn("DELETE 보상 트랜잭션: Secondary 유령 데이터 정리를 위해 Recovery Queue에 발행 (memoId: {})", memoId);
+                
+                return null;
+            },
+            "Memo"  // 엔티티 타입 (Recovery Queue 발행용)
+        );
     }
     
     /**
@@ -177,12 +357,18 @@ public class MemoService {
      * - Service: 데이터를 책별로 그룹화하는 최종 변환 담당
      * 
      * 참고: 노션 문서 (https://www.notion.so/29c4a8c850098058892bc37ed7f6f68a)
+     * 
+     * Dual Read 적용: Primary에서 읽기 시도, 실패 시 Secondary로 Failover
      */
     @Transactional(readOnly = true)
     public Map<Long, BookMemoGroup> getTodayFlowGroupedByBook(User user, LocalDate date) {
         LocalDateTime[] dateRange = calculateDateRange(date);
-        List<Memo> memos = memoRepository.findByUserIdAndDateOrderByBookAndMemoStartTimeAsc(
-            user.getId(), dateRange[0], dateRange[1]
+        
+        // Dual Read Failover 적용
+        List<Memo> memos = dualMasterReadService.readWithFailover(() -> 
+            memoRepository.findByUserIdAndDateOrderByBookAndMemoStartTimeAsc(
+                user.getId(), dateRange[0], dateRange[1]
+            )
         );
         
         // null 체크: userShelfBook이 null인 메모는 필터링
@@ -247,13 +433,19 @@ public class MemoService {
      * 
      * @param tagCategory 태그 대분류 (TYPE 또는 TOPIC). 선택된 대분류가 대표 태그 결정 시 1순위가 됨 (기본값: TYPE)
      * @return 태그별로 그룹화된 메모 (태그 그룹 -> 책 그룹 -> 메모 구조)
+     * 
+     * Dual Read 적용: Primary에서 읽기 시도, 실패 시 Secondary로 Failover
      */
     @Transactional(readOnly = true)
     public Map<String, TagMemoGroup> getTodayFlowGroupedByTag(User user, LocalDate date, TagCategory tagCategory) {
         // 날짜 기준으로 모든 메모를 시간순으로 조회
         LocalDateTime[] dateRange = calculateDateRange(date);
-        List<Memo> memos = memoRepository.findByUserIdAndDateOrderByMemoStartTimeAsc(
-            user.getId(), dateRange[0], dateRange[1]
+        
+        // Dual Read Failover 적용
+        List<Memo> memos = dualMasterReadService.readWithFailover(() -> 
+            memoRepository.findByUserIdAndDateOrderByMemoStartTimeAsc(
+                user.getId(), dateRange[0], dateRange[1]
+            )
         );
         
         // 대표 태그 결정 헬퍼 메서드
@@ -373,6 +565,8 @@ public class MemoService {
      * - 메모는 타임라인 순서로 정렬됨 (memo_start_time 기준)
      * 
      * 참고: 노션 문서 (https://www.notion.so/29c4a8c8500980fc932cd55dcaa28ab1)
+     * 
+     * Dual Read 적용: Primary에서 읽기 시도, 실패 시 Secondary로 Failover
      */
     @Transactional(readOnly = true)
     public List<Memo> getBookMemosByDate(User user, Long userBookId, LocalDate date) {
@@ -388,8 +582,12 @@ public class MemoService {
         
         // 날짜 범위 쿼리 사용 (인덱스 활용 최적화)
         LocalDateTime[] dateRange = calculateDateRange(date);
-        return memoRepository.findByUserIdAndUserShelfBookIdAndDate(
-            user.getId(), userBookId, dateRange[0], dateRange[1]
+        
+        // Dual Read Failover 적용
+        return dualMasterReadService.readWithFailover(() -> 
+            memoRepository.findByUserIdAndUserShelfBookIdAndDate(
+                user.getId(), userBookId, dateRange[0], dateRange[1]
+            )
         );
     }
     
@@ -407,6 +605,8 @@ public class MemoService {
      * - 전체 메모 조회: 선택한 책의 모든 메모를 오늘의 흐름 형식으로 조회 (날짜 제한 없음)
      * 
      * 참고: 섹션 1.3.3 책의 흐름 기능과의 관계
+     * 
+     * Dual Read 적용: Primary에서 읽기 시도, 실패 시 Secondary로 Failover
      */
     @Transactional(readOnly = true)
     public List<Memo> getAllBookMemos(User user, Long userBookId) {
@@ -421,8 +621,11 @@ public class MemoService {
         }
         
         // 날짜 제한 없이 모든 메모 조회 (타임라인 순서)
-        return memoRepository.findByUserIdAndUserShelfBookIdOrderByMemoStartTimeAsc(
-            user.getId(), userBookId
+        // Dual Read Failover 적용
+        return dualMasterReadService.readWithFailover(() -> 
+            memoRepository.findByUserIdAndUserShelfBookIdOrderByMemoStartTimeAsc(
+                user.getId(), userBookId
+            )
         );
     }
     
@@ -445,6 +648,8 @@ public class MemoService {
      * 3. 최신 메모 작성 시간 기준으로 정렬하여 반환
      * 
      * 참고: 섹션 1.3.3 책의 흐름 기능과의 관계
+     * 
+     * Dual Read 적용: Primary에서 읽기 시도, 실패 시 Secondary로 Failover
      */
     @Transactional(readOnly = true)
     public List<UserShelfBook> getBooksWithRecentMemos(User user, int monthsAgo) {
@@ -452,8 +657,11 @@ public class MemoService {
         LocalDateTime startDate = LocalDateTime.now().minusMonths(monthsAgo);
         
         // 최근 기간 내에 메모가 작성된 책 ID 목록 조회 (최신 메모 작성 시간 기준 정렬)
-        List<Object[]> results = memoRepository.findUserShelfBookIdsWithLastMemoTime(
-            user.getId(), startDate
+        // Dual Read Failover 적용
+        List<Object[]> results = dualMasterReadService.readWithFailover(() -> 
+            memoRepository.findUserShelfBookIdsWithLastMemoTime(
+                user.getId(), startDate
+            )
         );
         
         // 책 ID 목록 추출
@@ -595,7 +803,85 @@ public class MemoService {
             userShelfBook.setReview(request.getReview());
         }
         
-        userShelfBookRepository.save(userShelfBook);
+        // Dual Write 적용: UserShelfBook 업데이트
+        updateUserShelfBookWithDualWrite(userShelfBook);
+    }
+    
+    /**
+     * UserShelfBook 업데이트를 Dual Write로 처리하는 헬퍼 메서드
+     * (BookService의 동일한 메서드와 유사한 패턴 사용)
+     * 
+     * @param userShelfBook 업데이트할 UserShelfBook 엔티티
+     * @return 업데이트된 UserShelfBook 엔티티
+     */
+    private UserShelfBook updateUserShelfBookWithDualWrite(UserShelfBook userShelfBook) {
+        // 이전 상태 저장 (보상 트랜잭션용)
+        UserShelfBook originalState = new UserShelfBook();
+        originalState.setId(userShelfBook.getId());
+        originalState.setCategory(userShelfBook.getCategory());
+        originalState.setCategoryManuallySet(userShelfBook.isCategoryManuallySet());
+        originalState.setExpectation(userShelfBook.getExpectation());
+        originalState.setReadingStartDate(userShelfBook.getReadingStartDate());
+        originalState.setReadingProgress(userShelfBook.getReadingProgress());
+        originalState.setPurchaseType(userShelfBook.getPurchaseType());
+        originalState.setReadingFinishedDate(userShelfBook.getReadingFinishedDate());
+        originalState.setRating(userShelfBook.getRating());
+        originalState.setReview(userShelfBook.getReview());
+        originalState.setUpdatedAt(userShelfBook.getUpdatedAt());
+        
+        return dualMasterWriteService.writeWithDualWrite(
+            // Primary: JPA Repository 사용
+            () -> {
+                userShelfBook.setUpdatedAt(LocalDateTime.now());
+                return userShelfBookRepository.save(userShelfBook);
+            },
+            
+            // Secondary: JdbcTemplate 사용
+            (jdbcTemplate, updatedUserShelfBook) -> {
+                String updateUserShelfBookSql = "UPDATE user_books SET category = :category, " +
+                                               "category_manually_set = :categoryManuallySet, " +
+                                               "expectation = :expectation, reading_start_date = :readingStartDate, " +
+                                               "reading_progress = :readingProgress, purchase_type = :purchaseType, " +
+                                               "reading_finished_date = :readingFinishedDate, rating = :rating, " +
+                                               "review = :review, updated_at = :updatedAt " +
+                                               "WHERE id = :id";
+                
+                Map<String, Object> updateParams = new java.util.HashMap<>();
+                updateParams.put("id", updatedUserShelfBook.getId());
+                updateParams.put("category", updatedUserShelfBook.getCategory() != null ? updatedUserShelfBook.getCategory().name() : null);
+                updateParams.put("categoryManuallySet", updatedUserShelfBook.isCategoryManuallySet() != null ? updatedUserShelfBook.isCategoryManuallySet() : false);
+                updateParams.put("expectation", updatedUserShelfBook.getExpectation());
+                updateParams.put("readingStartDate", updatedUserShelfBook.getReadingStartDate());
+                updateParams.put("readingProgress", updatedUserShelfBook.getReadingProgress());
+                updateParams.put("purchaseType", updatedUserShelfBook.getPurchaseType() != null ? updatedUserShelfBook.getPurchaseType().name() : null);
+                updateParams.put("readingFinishedDate", updatedUserShelfBook.getReadingFinishedDate());
+                updateParams.put("rating", updatedUserShelfBook.getRating());
+                updateParams.put("review", updatedUserShelfBook.getReview());
+                updateParams.put("updatedAt", LocalDateTime.now());
+                
+                secondaryNamedParameterJdbcTemplate.update(updateUserShelfBookSql, updateParams);
+                return null;
+            },
+            
+            // 보상 트랜잭션: Primary에서 원래 상태로 복구
+            (updatedUserShelfBook) -> {
+                if (updatedUserShelfBook != null) {
+                    userShelfBook.setCategory(originalState.getCategory());
+                    userShelfBook.setCategoryManuallySet(originalState.isCategoryManuallySet());
+                    userShelfBook.setExpectation(originalState.getExpectation());
+                    userShelfBook.setReadingStartDate(originalState.getReadingStartDate());
+                    userShelfBook.setReadingProgress(originalState.getReadingProgress());
+                    userShelfBook.setPurchaseType(originalState.getPurchaseType());
+                    userShelfBook.setReadingFinishedDate(originalState.getReadingFinishedDate());
+                    userShelfBook.setRating(originalState.getRating());
+                    userShelfBook.setReview(originalState.getReview());
+                    userShelfBook.setUpdatedAt(originalState.getUpdatedAt());
+                    userShelfBookRepository.save(userShelfBook);
+                }
+                return null;
+            },
+            "UserShelfBook"  // 엔티티 타입 (Recovery Queue 발행용)
+        );
     }
     
     /**
@@ -606,12 +892,27 @@ public class MemoService {
      * @param year 조회할 년도
      * @param month 조회할 월 (1-12)
      * @return 날짜 문자열 리스트 (예: ["2024-01-15", "2024-01-20"])
+     * 
+     * Dual Read 적용: Primary에서 읽기 시도, 실패 시 Secondary로 Failover
      */
+    @Transactional(readOnly = true)
     public List<String> getMemoDates(User user, int year, int month) {
-        List<LocalDate> dates = memoRepository.findDistinctDatesByUserIdAndYearAndMonth(
-            user.getId(), year, month
+        // 해당 월의 시작일과 다음 달 시작일 계산
+        LocalDateTime startOfMonth = LocalDateTime.of(year, month, 1, 0, 0, 0);
+        LocalDateTime startOfNextMonth = startOfMonth.plusMonths(1);
+        
+        // Dual Read Failover 적용
+        List<LocalDateTime> memoStartTimes = dualMasterReadService.readWithFailover(() -> 
+            memoRepository.findMemoStartTimesByUserIdAndYearAndMonth(
+                user.getId(), startOfMonth, startOfNextMonth
+            )
         );
-        return dates.stream()
+        
+        // LocalDateTime에서 날짜만 추출하여 중복 제거 및 정렬
+        return memoStartTimes.stream()
+            .map(LocalDateTime::toLocalDate)  // LocalDateTime → LocalDate 변환
+            .distinct()  // 중복 제거
+            .sorted()  // 날짜순 정렬
             .map(LocalDate::toString)  // ISO 8601 형식으로 변환
             .collect(Collectors.toList());
     }

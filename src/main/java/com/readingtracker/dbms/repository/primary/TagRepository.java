@@ -1,4 +1,4 @@
-package com.readingtracker.dbms.repository;
+package com.readingtracker.dbms.repository.primary;
 
 import com.readingtracker.dbms.entity.Tag;
 import com.readingtracker.dbms.entity.TagCategory;

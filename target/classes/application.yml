@@ -4,6 +4,25 @@ spring:
   profiles:
     active: dev #기본 프로파일 활성화 : 개발 환경
   
+  # Primary/Secondary DB 설정 (MySQL 이중화)
+  datasource:
+    primary:
+      url: jdbc:mysql://localhost:3306/reading_tracker?useSSL=false&serverTimezone=Asia/Seoul&characterEncoding=UTF-8&allowPublicKeyRetrieval=true
+      username: root
+      password: ${PRIMARY_DB_PASSWORD:Yenapark1000}
+      driver-class-name: com.mysql.cj.jdbc.Driver
+      hikari:
+        maximum-pool-size: 10
+        minimum-idle: 5
+    secondary:
+      url: jdbc:mysql://localhost:3307/reading_tracker?useSSL=false&serverTimezone=Asia/Seoul&characterEncoding=UTF-8&allowPublicKeyRetrieval=true
+      username: root
+      password: ${SECONDARY_DB_PASSWORD:Yenapark1000}
+      driver-class-name: com.mysql.cj.jdbc.Driver
+      hikari:
+        maximum-pool-size: 10
+        minimum-idle: 5
+  
   jpa:
     hibernate:
       ddl-auto: none

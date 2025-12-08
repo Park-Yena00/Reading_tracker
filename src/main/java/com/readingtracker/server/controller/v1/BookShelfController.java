@@ -16,8 +16,8 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 
 import com.readingtracker.dbms.entity.User;
 import com.readingtracker.dbms.entity.UserShelfBook;
-import com.readingtracker.dbms.repository.UserRepository;
-import com.readingtracker.dbms.repository.UserShelfBookRepository;
+import com.readingtracker.dbms.repository.primary.UserRepository;
+import com.readingtracker.dbms.repository.primary.UserShelfBookRepository;
 import com.readingtracker.server.common.constant.BookCategory;
 import com.readingtracker.server.common.constant.BookSortCriteria;
 import com.readingtracker.server.dto.ApiResponse;

@@ -1,7 +1,8 @@
 package com.readingtracker.server.service;
 
 import com.readingtracker.dbms.entity.User;
-import com.readingtracker.dbms.repository.UserRepository;
+import com.readingtracker.dbms.repository.primary.UserRepository;
+import com.readingtracker.server.service.read.DualMasterReadService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -12,6 +13,9 @@ public class UserService {
     
     @Autowired
     private UserRepository userRepository;
+    
+    @Autowired
+    private DualMasterReadService dualMasterReadService;
     
     /**
      * 로그인 ID 중복 확인
@@ -35,9 +39,13 @@ public class UserService {
      * 로그인 ID로 사용자 조회
      * @param loginId 로그인 ID
      * @return 사용자 엔티티 (없으면 null)
+     * 
+     * Dual Read 적용: Primary에서 읽기 시도, 실패 시 Secondary로 Failover
      */
     public User findByLoginId(String loginId) {
-        return userRepository.findByLoginId(loginId).orElse(null);
+        return dualMasterReadService.readWithFailover(() -> 
+            userRepository.findByLoginId(loginId).orElse(null)
+        );
     }
     
     /**

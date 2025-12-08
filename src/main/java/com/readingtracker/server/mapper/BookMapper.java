@@ -3,7 +3,10 @@ package com.readingtracker.server.mapper;
 import com.readingtracker.dbms.entity.AladinBook;
 import com.readingtracker.dbms.entity.Book;
 import com.readingtracker.dbms.entity.UserShelfBook;
+import com.readingtracker.server.common.constant.BookCategory;
 import com.readingtracker.server.common.constant.BookSearchFilter;
+import com.readingtracker.server.common.constant.PurchaseType;
+import com.readingtracker.server.dto.UserShelfBookCacheDTO;
 import com.readingtracker.server.dto.requestDTO.BookAdditionRequest;
 import com.readingtracker.server.dto.requestDTO.BookDetailUpdateRequest;
 import com.readingtracker.server.dto.requestDTO.FinishReadingRequest;
@@ -13,6 +16,7 @@ import com.readingtracker.server.dto.responseDTO.BookSearchResponse;
 import com.readingtracker.server.dto.responseDTO.MyShelfResponse;
 
 
+import org.mapstruct.Context;
 import org.mapstruct.Mapper;
 import org.mapstruct.Mapping;
 
@@ -232,6 +236,92 @@ public interface BookMapper {
         if (request.getReview() != null) {
             userBook.setReview(request.getReview());
         }
+    }
+    
+    // ========== Redis 캐싱용 DTO 변환 ==========
+    
+    /**
+     * UserShelfBook Entity → UserShelfBookCacheDTO 변환
+     * Redis 캐싱을 위한 변환 (순환 참조 방지)
+     */
+    @Mapping(target = "userId", source = "user.id")
+    @Mapping(target = "bookId", source = "book.id")
+    @Mapping(target = "isbn", source = "book.isbn")
+    @Mapping(target = "title", source = "book.title")
+    @Mapping(target = "author", source = "book.author")
+    @Mapping(target = "publisher", source = "book.publisher")
+    @Mapping(target = "description", source = "book.description")
+    @Mapping(target = "coverUrl", source = "book.coverUrl")
+    @Mapping(target = "totalPages", source = "book.totalPages")
+    @Mapping(target = "mainGenre", source = "book.mainGenre")
+    @Mapping(target = "pubDate", source = "book.pubDate")
+    UserShelfBookCacheDTO toUserShelfBookCacheDTO(UserShelfBook userBook);
+    
+    /**
+     * List<UserShelfBook> → List<UserShelfBookCacheDTO> 변환
+     */
+    List<UserShelfBookCacheDTO> toUserShelfBookCacheDTOList(List<UserShelfBook> userBooks);
+    
+    /**
+     * UserShelfBookCacheDTO → UserShelfBook Entity 변환
+     * Redis 캐시에서 복원 시 사용
+     * @Context UserRepository: User 프록시 생성을 위한 Repository
+     */
+    default UserShelfBook toUserShelfBookEntity(UserShelfBookCacheDTO dto, @Context com.readingtracker.dbms.repository.primary.UserRepository userRepository) {
+        if (dto == null) {
+            return null;
+        }
+        
+        UserShelfBook entity = new UserShelfBook();
+        
+        // UserShelfBook 필드
+        entity.setId(dto.getId());
+        entity.setCategory(dto.getCategory());
+        entity.setCategoryManuallySet(dto.getCategoryManuallySet());
+        entity.setExpectation(dto.getExpectation());
+        entity.setReadingStartDate(dto.getReadingStartDate());
+        entity.setReadingProgress(dto.getReadingProgress());
+        entity.setPurchaseType(dto.getPurchaseType());
+        entity.setReadingFinishedDate(dto.getReadingFinishedDate());
+        entity.setRating(dto.getRating());
+        entity.setReview(dto.getReview());
+        entity.setUpdatedAt(dto.getUpdatedAt());
+        
+        // Book 엔티티 생성 및 설정
+        Book book = new Book();
+        book.setId(dto.getBookId());
+        book.setIsbn(dto.getIsbn());
+        book.setTitle(dto.getTitle());
+        book.setAuthor(dto.getAuthor());
+        book.setPublisher(dto.getPublisher());
+        book.setDescription(dto.getDescription());
+        book.setCoverUrl(dto.getCoverUrl());
+        book.setTotalPages(dto.getTotalPages());
+        book.setMainGenre(dto.getMainGenre());
+        book.setPubDate(dto.getPubDate());
+        entity.setBook(book);
+        
+        // User 프록시 생성 (실제 DB 조회 없이 참조만 설정)
+        if (dto.getUserId() != null && userRepository != null) {
+            com.readingtracker.dbms.entity.User user = userRepository.getReferenceById(dto.getUserId());
+            entity.setUser(user);
+        }
+        
+        return entity;
+    }
+    
+    /**
+     * List<UserShelfBookCacheDTO> → List<UserShelfBook> 변환
+     * Redis 캐시에서 복원 시 사용
+     */
+    default List<UserShelfBook> toUserShelfBookEntityList(List<UserShelfBookCacheDTO> dtos, @Context com.readingtracker.dbms.repository.primary.UserRepository userRepository) {
+        if (dtos == null) {
+            return List.of();
+        }
+        
+        return dtos.stream()
+            .map(dto -> toUserShelfBookEntity(dto, userRepository))
+            .toList();
     }
 }
 

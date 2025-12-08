@@ -1,14 +1,12 @@
-package com.readingtracker.dbms.repository;
+package com.readingtracker.dbms.repository.primary;
 
 import com.readingtracker.dbms.entity.User;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
-import org.springframework.stereotype.Repository;
 
 import java.util.Optional;
 
-@Repository
 public interface UserRepository extends JpaRepository<User, Long> {
     
     Optional<User> findByLoginId(String loginId);
@@ -31,5 +29,4 @@ public interface UserRepository extends JpaRepository<User, Long> {
     @Query("SELECT u FROM User u WHERE u.loginId = :loginId AND u.email = :email AND u.status = 'ACTIVE'")
     Optional<User> findActiveUserByLoginIdAndEmail(@Param("loginId") String loginId, @Param("email") String email);
 }
-
 

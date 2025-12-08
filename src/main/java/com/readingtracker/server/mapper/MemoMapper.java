@@ -3,7 +3,7 @@ package com.readingtracker.server.mapper;
 import com.readingtracker.dbms.entity.Memo;
 import com.readingtracker.dbms.entity.User;
 import com.readingtracker.dbms.entity.UserShelfBook;
-import com.readingtracker.dbms.repository.TagRepository;
+import com.readingtracker.dbms.repository.primary.TagRepository;
 import com.readingtracker.server.dto.requestDTO.MemoCreateRequest;
 import com.readingtracker.server.dto.requestDTO.MemoUpdateRequest;
 import com.readingtracker.server.dto.responseDTO.BookResponse;
@@ -146,7 +146,7 @@ public interface MemoMapper {
     default List<com.readingtracker.dbms.entity.Tag> processTags(
             List<String> tagCodes,
             String tagCategory,
-            @Context com.readingtracker.dbms.repository.TagRepository tagRepository) {
+            @Context TagRepository tagRepository) {
         if (tagCodes == null || tagCodes.isEmpty()) {
             // 태그 미선택 시 '기타' 태그 자동 연결
             // 현재 선택된 대분류에 맞는 etc 태그 선택 (기본값: TYPE)
