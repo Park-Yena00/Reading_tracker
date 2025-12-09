@@ -68,7 +68,6 @@ com\readingtracker\dbms\entity\UserShelfBook.class
 com\readingtracker\ReadingTrackerApplication.class
 com\readingtracker\server\service\alert\AlertService.class
 com\readingtracker\dbms\repository\primary\UserRepository.class
-com\readingtracker\server\service\BookSearchService$1.class
 com\readingtracker\server\dto\responseDTO\LoginIdRetrievalResponse.class
 com\readingtracker\server\dto\responseDTO\BookMemoGroup.class
 com\readingtracker\server\dto\requestDTO\MemoUpdateRequest.class

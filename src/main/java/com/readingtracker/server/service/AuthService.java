@@ -6,6 +6,7 @@ import com.readingtracker.dbms.entity.User;
 import com.readingtracker.dbms.repository.primary.PasswordResetTokenRepository;
 import com.readingtracker.dbms.repository.primary.UserRepository;
 import com.readingtracker.server.common.util.PasswordValidator;
+import com.readingtracker.server.service.read.DualMasterReadService;
 import com.readingtracker.server.service.write.DualMasterWriteService;
 
 import org.springframework.beans.factory.annotation.Autowired;
@@ -42,6 +43,9 @@ public class AuthService {
     private DualMasterWriteService dualMasterWriteService;
     
     @Autowired
+    private DualMasterReadService dualMasterReadService;
+    
+    @Autowired
     @Qualifier("secondaryNamedParameterJdbcTemplate")
     private NamedParameterJdbcTemplate secondaryNamedParameterJdbcTemplate;
     
@@ -64,12 +68,14 @@ public class AuthService {
      * Dual Write 적용: Primary는 JPA Repository, Secondary는 JdbcTemplate 사용
      */
     private User executeRegister(User user, String password) {
-        // 1. 중복 확인
-        if (userRepository.existsByLoginId(user.getLoginId())) {
+        // 1. 중복 확인 (Dual Read Failover 적용)
+        if (dualMasterReadService.readWithFailover(() -> 
+            userRepository.existsByLoginId(user.getLoginId()))) {
             throw new IllegalArgumentException(ErrorCode.DUPLICATE_LOGIN_ID.getMessage());
         }
         
-        if (userRepository.existsByEmail(user.getEmail())) {
+        if (dualMasterReadService.readWithFailover(() -> 
+            userRepository.existsByEmail(user.getEmail()))) {
             throw new IllegalArgumentException(ErrorCode.DUPLICATE_EMAIL.getMessage());
         }
         
@@ -138,8 +144,9 @@ public class AuthService {
      * @return 로그인 결과 (토큰 정보 및 사용자 Entity 포함)
      */
     private LoginResult executeLogin(String loginId, String password) {
-        // 1. 사용자 조회 (loginId만 허용)
-        User user = userRepository.findByLoginId(loginId)
+        // 1. 사용자 조회 (loginId만 허용) - Dual Read Failover 적용
+        User user = dualMasterReadService.readWithFailover(() -> 
+            userRepository.findByLoginId(loginId))
             .orElseThrow(() -> new IllegalArgumentException(ErrorCode.USER_NOT_FOUND.getMessage()));
         
         // 2. 계정 상태 확인
@@ -199,8 +206,9 @@ public class AuthService {
      * @return 사용자 엔티티
      */
     private User executeFindLoginId(String email, String name) {
-        // 이메일 + 이름으로 활성 사용자 조회 (둘 다 일치해야 함)
-        User user = userRepository.findActiveUserByEmailAndName(email, name)
+        // 이메일 + 이름으로 활성 사용자 조회 (둘 다 일치해야 함) - Dual Read Failover 적용
+        User user = dualMasterReadService.readWithFailover(() -> 
+            userRepository.findActiveUserByEmailAndName(email, name))
             .orElseThrow(() -> new IllegalArgumentException("존재하지 않는 계정입니다."));
         
         return user;
@@ -223,8 +231,9 @@ public class AuthService {
      * @return 재설정 토큰
      */
     private String executeVerifyAccount(String loginId, String email) {
-        // 1. loginId + email로 활성 사용자 조회 (둘 다 일치해야 함)
-        User user = userRepository.findActiveUserByLoginIdAndEmail(loginId, email)
+        // 1. loginId + email로 활성 사용자 조회 (둘 다 일치해야 함) - Dual Read Failover 적용
+        User user = dualMasterReadService.readWithFailover(() -> 
+            userRepository.findActiveUserByLoginIdAndEmail(loginId, email))
             .orElseThrow(() -> new IllegalArgumentException("존재하지 않는 계정입니다."));
         
         // 2. 기존 토큰 삭제 (같은 사용자의 이전 재설정 토큰)
@@ -262,17 +271,18 @@ public class AuthService {
      * @return 변경된 사용자 Entity
      */
     private User executeResetPassword(String resetToken, String newPassword, String confirmPassword) {
-        // 1. 토큰 검증
-        PasswordResetToken tokenEntity = passwordResetTokenRepository
-            .findValidToken(resetToken, LocalDateTime.now())
+        // 1. 토큰 검증 - Dual Read Failover 적용
+        PasswordResetToken tokenEntity = dualMasterReadService.readWithFailover(() -> 
+            passwordResetTokenRepository.findValidToken(resetToken, LocalDateTime.now()))
             .orElseThrow(() -> new IllegalArgumentException("유효하지 않거나 만료된 토큰입니다."));
         
-        // 2. 토큰으로 사용자 조회
+        // 2. 토큰으로 사용자 조회 - Dual Read Failover 적용
         Long userId = tokenEntity.getUserId();
         if (userId == null) {
             throw new IllegalArgumentException("토큰에 사용자 ID가 없습니다.");
         }
-        User user = userRepository.findById(userId)
+        User user = dualMasterReadService.readWithFailover(() -> 
+            userRepository.findById(userId))
             .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
         
         // 3. 사용자 상태 확인 (ACTIVE만 허용)

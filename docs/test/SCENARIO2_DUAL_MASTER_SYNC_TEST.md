@@ -936,6 +936,237 @@ DELETE 작업에서 Secondary DB 삭제 실패 시 Recovery Queue에 이벤트�
 
 ---
 
+## Primary DB 중단 및 보상 트랜잭션 롤백 과정 확인
+
+### Primary DB 중단 방법
+
+Primary DB는 로컬 노트북에서 MySQL로 구성되어 있으므로, 다음 방법으로 중단할 수 있습니다:
+
+#### 방법 1: Windows 서비스 중지 (권장)
+
+**CMD 또는 PowerShell에서 실행 (관리자 권한 필요)**:
+```cmd
+# MySQL 서비스 중지
+net stop MySQL80
+
+# 또는
+sc stop MySQL80
+
+# 서비스 상태 확인
+sc query MySQL80
+```
+
+**서비스 상태 확인**:
+- `STATE`가 `STOPPED`로 표시되면 중단 성공
+- `STATE`가 `RUNNING`이면 아직 실행 중
+
+#### 방법 2: MySQL 프로세스 종료
+
+**CMD 또는 PowerShell에서 실행**:
+```cmd
+# MySQL 프로세스 확인
+tasklist | findstr mysql
+
+# MySQL 프로세스 종료 (PID 확인 후)
+taskkill /PID [PID번호] /F
+
+# 또는 모든 MySQL 프로세스 종료
+taskkill /IM mysqld.exe /F
+```
+
+**주의사항**:
+- 이 방법은 데이터 손실 위험이 있으므로 테스트 환경에서만 사용
+- 프로덕션 환경에서는 절대 사용하지 마세요
+
+#### Primary DB 재시작 방법
+
+**CMD 또는 PowerShell에서 실행 (관리자 권한 필요)**:
+```cmd
+# MySQL 서비스 시작
+net start MySQL80
+
+# 또는
+sc start MySQL80
+
+# 서비스 상태 확인
+sc query MySQL80
+```
+
+**확인 사항**:
+- `STATE`가 `RUNNING`으로 표시되면 재시작 성공
+- 서버 Console에서 Primary DB 연결 성공 로그 확인
+
+---
+
+### 보상 트랜잭션 롤백 과정 확인 방법
+
+Secondary DB 쓰기 실패 시 Primary DB에서 보상 트랜잭션이 실행되어 데이터가 롤백됩니다. 이 과정을 실시간으로 확인할 수 있는 방법은 다음과 같습니다:
+
+#### 사전 준비
+
+1. **두 개의 MySQL Command Line Client 창 열기**
+   - 창 1: Primary DB 모니터링용 (롤백 전/후 데이터 확인)
+   - 창 2: Secondary DB 상태 확인용 (선택사항)
+
+2. **Primary DB 접속**
+   ```sql
+   -- Primary DB 접속 (포트 3306)
+   mysql -u root -p -h localhost -P 3306
+   
+   -- 비밀번호 입력 후
+   USE reading_tracker;
+   ```
+
+#### 테스트 시나리오: 메모 작성 시 Secondary DB 실패
+
+**단계 1: 롤백 전 데이터 확인 쿼리 준비**
+
+Primary DB 모니터링 창에서 다음 쿼리를 준비합니다:
+
+```sql
+-- 현재 메모 개수 확인
+SELECT COUNT(*) as memo_count FROM memo;
+
+-- 최근 생성된 메모 확인 (최신 5개)
+SELECT id, user_id, user_book_id, page_number, content, memo_start_time, created_at 
+FROM memo 
+ORDER BY created_at DESC 
+LIMIT 5;
+
+-- 특정 사용자의 메모 확인 (테스트용)
+SELECT id, user_id, user_book_id, page_number, content, memo_start_time, created_at 
+FROM memo 
+WHERE user_id = [사용자ID]
+ORDER BY created_at DESC;
+```
+
+**단계 2: Secondary DB 중단**
+
+**PowerShell 또는 CMD에서 실행**:
+```cmd
+# Secondary DB Docker 컨테이너 중지
+docker stop mysql-secondary
+
+# 또는 Secondary DB가 별도 MySQL 인스턴스인 경우
+# 해당 MySQL 서비스를 중지
+```
+
+**단계 3: 웹 UI에서 메모 작성**
+
+1. 웹 브라우저에서 로그인
+2. "오늘의 흐름" 화면에서 메모 작성 시도
+3. 서버 Console에서 다음 로그 확인:
+   ```
+   ERROR ... DualMasterWriteService : Secondary DB 쓰기 실패, Primary에 보상 트랜잭션 실행
+   INFO  ... DualMasterWriteService : 보상 트랜잭션 실행 성공
+   ```
+
+**단계 4: 롤백 전 데이터 확인 (보상 트랜잭션 실행 직전)**
+
+메모 작성 직후, 보상 트랜잭션이 실행되기 전에 Primary DB 모니터링 창에서 다음 쿼리를 실행합니다:
+
+```sql
+-- 롤백 전: 최근 생성된 메모 확인
+SELECT id, user_id, user_book_id, page_number, content, memo_start_time, created_at 
+FROM memo 
+ORDER BY created_at DESC 
+LIMIT 5;
+
+-- 롤백 전: 메모 개수 확인
+SELECT COUNT(*) as memo_count_before_rollback FROM memo;
+```
+
+**예상 결과**:
+- 새로 작성한 메모가 Primary DB에 존재함
+- 메모 개수가 증가함
+
+**단계 5: 롤백 후 데이터 확인 (보상 트랜잭션 실행 직후)**
+
+보상 트랜잭션이 실행된 후 (서버 Console에서 "보상 트랜잭션 실행 성공" 로그 확인 후), Primary DB 모니터링 창에서 동일한 쿼리를 다시 실행합니다:
+
+```sql
+-- 롤백 후: 최근 생성된 메모 확인
+SELECT id, user_id, user_book_id, page_number, content, memo_start_time, created_at 
+FROM memo 
+ORDER BY created_at DESC 
+LIMIT 5;
+
+-- 롤백 후: 메모 개수 확인
+SELECT COUNT(*) as memo_count_after_rollback FROM memo;
+```
+
+**예상 결과**:
+- 새로 작성한 메모가 Primary DB에서 삭제됨 (롤백됨)
+- 메모 개수가 롤백 전과 동일함 (또는 감소함)
+
+#### 실시간 모니터링 스크립트 (선택사항)
+
+Primary DB 모니터링을 자동화하려면 다음 스크립트를 사용할 수 있습니다:
+
+**PowerShell 스크립트 (monitor-primary-db.ps1)**:
+```powershell
+# Primary DB 모니터링 스크립트
+# 사용법: .\monitor-primary-db.ps1
+
+$mysqlCmd = "mysql -u root -pYenapark1000 -h localhost -P 3306 reading_tracker"
+
+while ($true) {
+    Write-Host "`n=== $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ===" -ForegroundColor Cyan
+    Write-Host "메모 개수:" -ForegroundColor Yellow
+    & $mysqlCmd -e "SELECT COUNT(*) as memo_count FROM memo;"
+    
+    Write-Host "`n최근 메모 5개:" -ForegroundColor Yellow
+    & $mysqlCmd -e "SELECT id, user_id, LEFT(content, 50) as content_preview, created_at FROM memo ORDER BY created_at DESC LIMIT 5;"
+    
+    Start-Sleep -Seconds 2
+}
+```
+
+**사용 방법**:
+1. 위 스크립트를 `monitor-primary-db.ps1` 파일로 저장
+2. PowerShell에서 실행: `.\monitor-primary-db.ps1`
+3. 메모 작성 시도 시 실시간으로 데이터 변화 확인
+
+#### 다른 엔티티 타입 확인 방법
+
+메모 외의 다른 엔티티(예: User, UserShelfBook)에 대한 보상 트랜잭션도 동일한 방법으로 확인할 수 있습니다:
+
+**User 테이블 확인**:
+```sql
+-- 롤백 전/후 사용자 확인
+SELECT id, login_id, email, name, status, last_login_at, updated_at 
+FROM users 
+ORDER BY updated_at DESC 
+LIMIT 5;
+```
+
+**UserShelfBook 테이블 확인**:
+```sql
+-- 롤백 전/후 사용자 책 확인
+SELECT id, user_id, book_id, category, reading_progress, updated_at 
+FROM user_books 
+ORDER BY updated_at DESC 
+LIMIT 5;
+```
+
+#### 주의사항
+
+1. **타이밍 이슈**
+   - 보상 트랜잭션은 매우 빠르게 실행되므로, 롤백 전 데이터 확인이 어려울 수 있습니다
+   - 가능하면 자동화 스크립트를 사용하거나, 쿼리를 미리 준비해두고 빠르게 실행하세요
+
+2. **트랜잭션 격리 수준**
+   - MySQL의 기본 격리 수준(REPEATABLE READ)에서는 다른 세션에서 커밋된 데이터를 즉시 볼 수 없을 수 있습니다
+   - 필요시 `SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED;` 설정
+
+3. **Secondary DB 복구**
+   - 테스트 완료 후 반드시 Secondary DB를 재시작하세요:
+     ```cmd
+     docker start mysql-secondary
+     ```
+
+---
+
 ## 주의사항
 
 1. **DB 연결 차단 테스트 후 반드시 복구**
@@ -951,6 +1182,10 @@ DELETE 작업에서 Secondary DB 삭제 실패 시 Recovery Queue에 이벤트�
 
 3. **서버 재시작**
    - application.yml을 수정한 경우 반드시 서버를 재시작해야 합니다.
+
+4. **Primary DB 중단 테스트 주의**
+   - Primary DB를 중단한 후 반드시 재시작하세요
+   - 프로덕션 환경에서는 절대 사용하지 마세요
 
 ---
 
