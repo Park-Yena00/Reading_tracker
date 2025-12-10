@@ -7,6 +7,8 @@ import com.readingtracker.dbms.repository.primary.UserDeviceRepository;
 import com.readingtracker.dbms.repository.primary.UserRepository;
 import com.readingtracker.server.common.util.JwtUtil;
 import com.readingtracker.server.service.RefreshTokenRedisService.RefreshTokenData;
+import com.readingtracker.dbms.repository.secondary.SecondaryUserDao;
+import com.readingtracker.server.service.read.DualMasterReadService;
 import com.readingtracker.server.service.write.DualMasterWriteService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -36,6 +38,12 @@ public class JwtService {
     
     @Autowired
     private JwtConfig jwtConfig;
+    
+    @Autowired
+    private DualMasterReadService dualMasterReadService;
+    
+    @Autowired
+    private SecondaryUserDao secondaryUserDao;
     
     @Autowired
     private DualMasterWriteService dualMasterWriteService;
@@ -330,8 +338,10 @@ public class JwtService {
             throw new IllegalArgumentException("만료된 Refresh Token입니다.");
         }
         
-        // 6. 사용자 조회
-        User user = userRepository.findById(userId)
+        // 6. 사용자 조회 (Dual Read 적용: Primary에서 읽기 시도, 실패 시 Secondary로 Failover)
+        User user = dualMasterReadService.readWithFailover(
+            () -> userRepository.findById(userId),
+            () -> secondaryUserDao.findById(userId))
             .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
         if (!"ACTIVE".equals(user.getStatus().name())) {
             throw new IllegalArgumentException("비활성화된 계정입니다.");

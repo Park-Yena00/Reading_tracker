@@ -78,6 +78,7 @@ Reading Tracker는 사용자가 읽은 책을 기록하고 관리할 수 있는 
 - **MySQL** 8.0
 - **Spring Data JPA** (ORM)
 - **Flyway** (데이터베이스 마이그레이션)
+- **MySQL Dual Master 구성** (고가용성 및 데이터 일관성)
 
 ### Security
 - **Spring Security**
@@ -98,6 +99,8 @@ Reading Tracker는 사용자가 읽은 책을 기록하고 관리할 수 있는 
 - **Lombok** (보일러플레이트 코드 제거)
 - **Validation** (입력값 검증)
 - **MapStruct** (DTO 변환 매퍼)
+- **Redis** (캐싱 및 세션 관리)
+- **Docker** (Secondary DB 및 Redis 컨테이너 관리)
 
 ---
 
@@ -108,8 +111,12 @@ Reading Tracker는 사용자가 읽은 책을 기록하고 관리할 수 있는 
 - **Java** 17 이상
 - **Maven** 3.6 이상
 - **MySQL** 8.0 이상
+- **Docker** (시나리오 2 실행 시 필요)
+- **Docker Compose** (시나리오 2 실행 시 필요)
 
 ### 데이터베이스 설정
+
+#### 기본 설정 (Primary DB만 사용)
 
 1. MySQL 데이터베이스 생성:
 ```sql
@@ -120,20 +127,177 @@ CREATE DATABASE reading_tracker CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
 ```yaml
 spring:
   datasource:
-    url: jdbc:mysql://localhost:3306/reading_tracker?useSSL=false&serverTimezone=Asia/Seoul&allowPublicKeyRetrieval=true
-    username: {your_username}
-    password: {your_password}
+    primary:
+      url: jdbc:mysql://localhost:3306/reading_tracker?useSSL=false&serverTimezone=Asia/Seoul&allowPublicKeyRetrieval=true
+      username: root
+      password: Yenapark1000
 ```
    
    **참고**: 프로젝트는 한국 시간대(Asia/Seoul, UTC+9)를 기준으로 동작합니다. 모든 시간 필드값이 한국 시간대로 저장됩니다.
 
-3. 알라딘 API 키 설정 (선택사항):
+#### 시나리오 2: MySQL 이중화 설정 (Dual Master)
+
+본 프로젝트는 **MySQL Dual Master 구성**을 지원합니다. Primary DB와 Secondary DB를 동시에 운영하여 고가용성과 데이터 일관성을 보장합니다.
+
+**⚠️ 중요**: 시나리오 2를 실행하려면 Secondary DB를 별도로 설정해야 합니다.
+
+##### 1. Secondary DB 생성 (Docker Compose 사용)
+
+프로젝트 루트 디렉토리에서 다음 명령어를 실행합니다:
+
+```bash
+# Docker Compose로 Secondary DB 및 Redis 실행
+docker-compose up -d
+
+# 실행 상태 확인
+docker-compose ps
+```
+
+**설정 내용**:
+- Secondary DB 포트: `3307` (Primary DB는 `3306`)
+- 컨테이너 이름: `reading-tracker-secondary-db`
+- 데이터베이스 이름: `reading_tracker`
+- Root 비밀번호: `Yenapark1000`
+
+**확인 사항**:
+```bash
+# 컨테이너가 정상 실행 중인지 확인
+docker ps | grep reading-tracker-secondary-db
+
+# 포트 3307이 열려있는지 확인 (Windows)
+netstat -an | findstr "3307"
+```
+
+##### 2. Primary DB와 초기 동기화
+
+Secondary DB는 빈 데이터베이스로 시작하므로, Primary DB의 기존 데이터를 Secondary DB로 복사해야 합니다.
+
+**2-1. Primary DB 데이터 덤프**
+
+```bash
+# Windows (CMD)
+mysqldump -u root -pYenapark1000 -h localhost -P 3306 reading_tracker > primary_dump.sql
+
+# 또는 비밀번호를 입력하도록 하려면
+mysqldump -u root -p -h localhost -P 3306 reading_tracker > primary_dump.sql
+```
+
+**2-2. Secondary DB에 데이터 복원**
+
+```bash
+# Windows (CMD)
+mysql -u root -pYenapark1000 -h localhost -P 3307 reading_tracker < primary_dump.sql
+
+# 또는 비밀번호를 입력하도록 하려면
+mysql -u root -p -h localhost -P 3307 reading_tracker < primary_dump.sql
+```
+
+**2-3. 데이터 동기화 확인**
+
+```sql
+-- Primary DB에서
+mysql -u root -p -h localhost -P 3306
+USE reading_tracker;
+SELECT COUNT(*) AS memo_count FROM memo;
+SELECT COUNT(*) AS user_count FROM users;
+SELECT COUNT(*) AS book_count FROM books;
+
+-- Secondary DB에서
+mysql -u root -p -h localhost -P 3307
+USE reading_tracker;
+SELECT COUNT(*) AS memo_count FROM memo;
+SELECT COUNT(*) AS user_count FROM users;
+SELECT COUNT(*) AS book_count FROM books;
+```
+
+**확인 사항**: Primary와 Secondary DB의 데이터 개수가 일치해야 합니다.
+
+**💡 초기 동기화 완료 후**
+
+초기 동기화가 완료되면, 이후 발생하는 모든 신규 CUD(Create, Update, Delete) 작업은 **Dual Write 로직**을 통해 자동으로 양쪽 DB에 동시에 반영됩니다.
+
+##### 3. Primary DB 중단 테스트 (Read Failover 검증)
+
+시나리오 2에서는 Primary DB가 중단되었을 때 Secondary DB로 자동 전환되는 **Read Failover** 기능을 테스트할 수 있습니다.
+
+**3-1. Primary DB 중단**
+
+```bash
+# Windows에서 MySQL 서비스 중지
+net stop MySQL80
+
+# 또는 MySQL 프로세스 종료
+taskkill /F /IM mysqld.exe
+```
+
+**3-2. 애플리케이션 동작 확인**
+
+Primary DB가 중단된 상태에서도 애플리케이션이 정상 동작해야 합니다:
+- 로그인/회원가입 등 인증 기능
+- 도서 검색 및 서재 조회
+- 메모 조회 등 모든 READ 작업
+
+**확인 방법**:
+- 애플리케이션 로그에서 "Secondary DB 읽기 성공 (Failover)" 메시지 확인
+- Swagger UI 또는 프론트엔드에서 API 호출 테스트
+
+**3-3. Primary DB 재시작**
+
+```bash
+# Windows에서 MySQL 서비스 시작
+net start MySQL80
+```
+
+**3-4. Secondary DB 중단 테스트 (선택)**
+
+Secondary DB를 중단하여 Primary DB만 사용하는 상황도 테스트할 수 있습니다:
+
+```bash
+# Secondary DB Docker 컨테이너 중지
+docker stop reading-tracker-secondary-db
+
+# Secondary DB Docker 컨테이너 재시작
+docker start reading-tracker-secondary-db
+```
+
+##### 4. application.yml 설정 확인
+
+`src/main/resources/application.yml` 파일에서 다음 설정이 올바르게 되어 있는지 확인합니다:
+
+```yaml
+spring:
+  datasource:
+    primary:
+      url: jdbc:mysql://localhost:3306/reading_tracker?useSSL=false&serverTimezone=Asia/Seoul&characterEncoding=UTF-8&allowPublicKeyRetrieval=true
+      username: root
+      password: ${PRIMARY_DB_PASSWORD:Yenapark1000}
+    secondary:
+      url: jdbc:mysql://localhost:3307/reading_tracker?useSSL=false&serverTimezone=Asia/Seoul&characterEncoding=UTF-8&allowPublicKeyRetrieval=true
+      username: root
+      password: ${SECONDARY_DB_PASSWORD:Yenapark1000}
+```
+
+**환경 변수 설정 (선택)**:
+```bash
+# Windows (CMD)
+set PRIMARY_DB_PASSWORD=Yenapark1000
+set SECONDARY_DB_PASSWORD=Yenapark1000
+
+# Windows (PowerShell)
+$env:PRIMARY_DB_PASSWORD="Yenapark1000"
+$env:SECONDARY_DB_PASSWORD="Yenapark1000"
+```
+
+##### 5. 알라딘 API 키 설정 (선택사항)
+
 ```yaml
 aladin:
   api:
     key: {your_aladin_api_key}
     base-url: http://www.aladin.co.kr/ttb/api
 ```
+
+**자세한 시나리오 2 테스트 가이드는 [docs/test/SCENARIO2_DUAL_MASTER_SYNC_TEST.md](docs/test/SCENARIO2_DUAL_MASTER_SYNC_TEST.md)를 참고하세요.**
 
 ### 실행 방법
 
@@ -288,6 +452,8 @@ com.readingtracker
 │
 └── dbms                              # DBMS 관련
     ├── repository                    # 데이터 접근 계층
+    │   ├── primary                   # Primary DB (JPA Repository)
+    │   └── secondary                 # Secondary DB (JdbcTemplate DAO)
     ├── entity                        # JPA 엔티티
     └── dto                           # 서버-DBMS DTO
         └── ServerDbmsDTO
@@ -334,6 +500,15 @@ API 관련 문서를 포함합니다:
   - 비용 및 추천 전략
   - 배포 구성 요소 설명
 
+### 📁 docs/test/
+
+테스트 가이드 문서를 포함합니다:
+
+- **[SCENARIO2_DUAL_MASTER_SYNC_TEST.md](docs/test/SCENARIO2_DUAL_MASTER_SYNC_TEST.md)**: MySQL 이중화 및 양방향 동기화 테스트 가이드
+  - Dual Master 구성 설정 방법
+  - 초기 동기화 방법
+  - Dual Write 및 Read Failover 테스트 방법
+
 ---
 
 ## 주요 특징
@@ -352,6 +527,9 @@ API 관련 문서를 포함합니다:
 - **Flyway 마이그레이션**: 데이터베이스 스키마 버전 관리
 - **JPA Auditing**: 생성/수정 시간 자동 관리
 - **트랜잭션 관리**: `@Transactional`을 통한 데이터 일관성 보장
+- **MySQL Dual Master**: 고가용성을 위한 이중화 구성
+- **Dual Write**: Primary와 Secondary DB에 동시 쓰기
+- **Read Failover**: Primary DB 장애 시 Secondary DB로 자동 전환
 
 ### 🎯 사용자 경험
 - **유연한 메모 시스템**: 페이지당 메모 개수 제한 없음
@@ -373,4 +551,4 @@ API 관련 문서를 포함합니다:
 ---
 
 **최종 업데이트**: 2024년 12월  
-**버전**: 1.2
+**버전**: 2.0

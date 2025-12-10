@@ -50,7 +50,7 @@ public interface MemoMapper {
      * MemoUpdateRequest → Memo Entity 부분 업데이트
      * 
      * 기존 Memo 엔티티에 RequestDTO의 필드만 업데이트합니다.
-     * content와 tags만 수정 가능하며, pageNumber는 수정 불가입니다.
+     * content, tags, pageNumber를 수정할 수 있습니다.
      * 
      * @param memo 기존 Memo 엔티티 (업데이트 대상)
      * @param request MemoUpdateRequest DTO
@@ -59,7 +59,7 @@ public interface MemoMapper {
     @Mapping(target = "id", ignore = true)
     @Mapping(target = "user", ignore = true)
     @Mapping(target = "userShelfBook", ignore = true)
-    @Mapping(target = "pageNumber", ignore = true)  // 수정 불가
+    @Mapping(target = "pageNumber", source = "request.pageNumber")
     @Mapping(target = "content", source = "request.content")
     @Mapping(target = "tags", expression = "java(processTags(request.getTags(), request.getTagCategory(), tagRepository))")
     @Mapping(target = "memoStartTime", ignore = true)

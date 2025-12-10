@@ -3,6 +3,7 @@ package com.readingtracker.server.service;
 import com.readingtracker.dbms.entity.User;
 import com.readingtracker.dbms.entity.UserDevice;
 import com.readingtracker.dbms.repository.primary.UserDeviceRepository;
+import com.readingtracker.dbms.repository.secondary.SecondaryUserDeviceDao;
 import com.readingtracker.server.service.recovery.RecoveryQueueService;
 import com.readingtracker.server.service.write.DualMasterWriteService;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -29,6 +30,9 @@ public class UserDeviceService {
     
     @Autowired
     private com.readingtracker.server.service.read.DualMasterReadService dualMasterReadService;
+    
+    @Autowired
+    private SecondaryUserDeviceDao secondaryUserDeviceDao;
     
     @Autowired
     @Qualifier("secondaryNamedParameterJdbcTemplate")
@@ -73,8 +77,9 @@ public class UserDeviceService {
      */
     @Transactional(readOnly = true)
     public List<UserDevice> getUserDevices(Long userId) {
-        return dualMasterReadService.readWithFailover(() -> 
-            userDeviceRepository.findByUserIdOrderByLastSeenAtDesc(userId)
+        return dualMasterReadService.readWithFailover(
+            () -> userDeviceRepository.findByUserIdOrderByLastSeenAtDesc(userId),
+            () -> secondaryUserDeviceDao.findByUserIdOrderByLastSeenAtDesc(userId)
         );
     }
     

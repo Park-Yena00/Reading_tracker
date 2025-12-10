@@ -95,6 +95,16 @@ public class DualMasterWriteService {
             // Secondary 실패 시 Primary에 보상 트랜잭션 실행
             log.error("Secondary DB 쓰기 실패, Primary에 보상 트랜잭션 실행", e);
             
+            // 데모 시연용: Primary DB 변경사항이 잠시 적용된 상태를 확인하기 위한 대기 시간
+            log.info("데모 시연: Primary DB 변경사항 확인을 위해 3초 대기 중... (보상 트랜잭션 실행 전)");
+            try {
+                Thread.sleep(3000); // 3초 대기
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                log.warn("대기 시간 중 인터럽트 발생", ie);
+            }
+            log.info("대기 완료. 보상 트랜잭션 실행 시작...");
+            
             final T finalPrimaryResult = primaryResult;
             try {
                 TransactionTemplate compensationTx = new TransactionTemplate(primaryTxManager);

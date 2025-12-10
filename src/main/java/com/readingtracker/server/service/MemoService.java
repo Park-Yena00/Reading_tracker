@@ -7,12 +7,15 @@ import com.readingtracker.dbms.entity.User;
 import com.readingtracker.dbms.entity.UserShelfBook;
 import com.readingtracker.dbms.repository.primary.MemoRepository;
 import com.readingtracker.dbms.repository.primary.UserShelfBookRepository;
+import com.readingtracker.dbms.repository.secondary.SecondaryMemoDao;
 import com.readingtracker.server.common.constant.BookCategory;
 import com.readingtracker.server.dto.responseDTO.BookMemoGroup;
 import com.readingtracker.server.dto.responseDTO.MemoResponse;
 import com.readingtracker.server.dto.responseDTO.TagMemoGroup;
 import com.readingtracker.server.mapper.MemoMapper;
 import com.readingtracker.server.service.write.DualMasterWriteService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -33,6 +36,8 @@ import java.util.stream.Collectors;
 // @Transactional 제거 (Dual Write를 위해)
 public class MemoService {
     
+    private static final Logger log = LoggerFactory.getLogger(MemoService.class);
+    
     @Autowired
     private MemoRepository memoRepository;
     
@@ -47,6 +52,9 @@ public class MemoService {
     
     @Autowired
     private com.readingtracker.server.service.read.DualMasterReadService dualMasterReadService;
+    
+    @Autowired
+    private SecondaryMemoDao secondaryMemoDao;
     
     @Autowired
     private org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate secondaryNamedParameterJdbcTemplate;
@@ -154,16 +162,29 @@ public class MemoService {
             throw new IllegalArgumentException("권한이 없습니다.");
         }
         
-        // 2. 이전 상태 저장 (보상 트랜잭션용)
-        Memo originalState = new Memo();
-        originalState.setId(existingMemo.getId());
-        originalState.setContent(existingMemo.getContent());
-        originalState.setPageNumber(existingMemo.getPageNumber());
-        originalState.setMemoStartTime(existingMemo.getMemoStartTime());
-        originalState.setUpdatedAt(existingMemo.getUpdatedAt());
+        // 2. UPDATE 전 원래 상태를 DB에서 조회 (보상 트랜잭션용)
+        // 주의: existingMemo는 이미 조회된 상태이지만, 보상 트랜잭션에서 사용할 원래 상태를 명확히 저장
+        final Memo originalState;
+        if (existingMemo.getId() != null) {
+            // DB에서 조회한 원래 상태를 복사
+            originalState = new Memo();
+            originalState.setId(existingMemo.getId());
+            originalState.setContent(existingMemo.getContent());
+            originalState.setPageNumber(existingMemo.getPageNumber());
+            originalState.setMemoStartTime(existingMemo.getMemoStartTime());
+            originalState.setUpdatedAt(existingMemo.getUpdatedAt());
+            // 원래 태그 목록도 저장 (보상 트랜잭션에서 복구용)
+            if (existingMemo.getTags() != null) {
+                originalState.setTags(new java.util.ArrayList<>(existingMemo.getTags()));
+            } else {
+                originalState.setTags(new java.util.ArrayList<>());
+            }
+        } else {
+            log.warn("보상 트랜잭션용 원래 상태 조회 실패: memoId가 null입니다.");
+            originalState = null;
+        }
         
-        // 3. 필드 업데이트 (content와 tags만 수정 가능)
-        // 참고: pageNumber는 메모 작성 시점의 시작 위치를 나타내는 메타데이터이므로 수정 불가
+        // 3. 필드 업데이트 (content, tags, pageNumber 수정 가능)
         // Mapper에서 이미 변환된 Entity의 필드만 업데이트
         // Mapper의 updateMemoFromRequest에서 이미 필드가 업데이트되었으므로 여기서는 저장만 수행
         
@@ -172,6 +193,10 @@ public class MemoService {
             () -> {
                 existingMemo.setContent(memo.getContent());
                 existingMemo.setTags(memo.getTags());
+                // pageNumber도 수정 가능 (Mapper에서 이미 설정됨)
+                if (memo.getPageNumber() != null) {
+                    existingMemo.setPageNumber(memo.getPageNumber());
+                }
                 existingMemo.setUpdatedAt(LocalDateTime.now());
                 return memoRepository.save(existingMemo);
             },
@@ -180,11 +205,12 @@ public class MemoService {
             (jdbcTemplate, updatedMemo) -> {
                 NamedParameterJdbcTemplate namedTemplate = secondaryNamedParameterJdbcTemplate;
                 
-                // Memo UPDATE
-                String updateMemoSql = "UPDATE memo SET content = :content, updated_at = :updatedAt WHERE id = :id";
+                // Memo UPDATE (페이지 번호도 포함)
+                String updateMemoSql = "UPDATE memo SET content = :content, page_number = :pageNumber, updated_at = :updatedAt WHERE id = :id";
                 Map<String, Object> updateParams = new java.util.HashMap<>();
                 updateParams.put("id", memoId);
                 updateParams.put("content", updatedMemo.getContent());
+                updateParams.put("pageNumber", updatedMemo.getPageNumber());
                 updateParams.put("updatedAt", LocalDateTime.now());
                 namedTemplate.update(updateMemoSql, updateParams);
                 
@@ -209,10 +235,30 @@ public class MemoService {
             
             // 보상 트랜잭션: Primary에서 원래 상태로 복구
             (updatedMemo) -> {
-                if (updatedMemo != null) {
-                    existingMemo.setContent(originalState.getContent());
-                    existingMemo.setUpdatedAt(originalState.getUpdatedAt());
-                    memoRepository.save(existingMemo);
+                if (updatedMemo != null && originalState != null) {
+                    // DB에서 엔티티를 다시 조회하여 원래 상태로 복구
+                    Memo memoToRestore = memoRepository.findById(updatedMemo.getId())
+                        .orElseThrow(() -> new IllegalStateException("보상 트랜잭션: 복구할 메모를 찾을 수 없습니다. memoId=" + updatedMemo.getId()));
+                    
+                    // 원래 상태로 복구
+                    memoToRestore.setContent(originalState.getContent());
+                    memoToRestore.setPageNumber(originalState.getPageNumber());
+                    memoToRestore.setMemoStartTime(originalState.getMemoStartTime());
+                    memoToRestore.setUpdatedAt(originalState.getUpdatedAt());
+                    
+                    // 원래 태그 목록으로 복구
+                    if (originalState.getTags() != null) {
+                        memoToRestore.setTags(new java.util.ArrayList<>(originalState.getTags()));
+                    } else {
+                        memoToRestore.setTags(new java.util.ArrayList<>());
+                    }
+                    
+                    // DB에 저장하여 롤백 완료
+                    memoRepository.save(memoToRestore);
+                    log.info("보상 트랜잭션: Primary DB에서 원래 상태로 복구 완료. memoId={}", updatedMemo.getId());
+                } else {
+                    log.warn("보상 트랜잭션: 원래 상태가 없어 복구할 수 없습니다. memoId={}", 
+                            updatedMemo != null ? updatedMemo.getId() : "null");
                 }
                 return null;
             },
@@ -232,9 +278,16 @@ public class MemoService {
         }
         
         // Dual Read Failover 적용
-        Memo memo = dualMasterReadService.readWithFailover(() -> 
-            memoRepository.findById(memoId)
-                .orElseThrow(() -> new IllegalArgumentException("메모를 찾을 수 없습니다."))
+        Memo memo = dualMasterReadService.readWithFailover(
+            () -> memoRepository.findById(memoId)
+                .orElseThrow(() -> new IllegalArgumentException("메모를 찾을 수 없습니다.")),
+            () -> {
+                Memo foundMemo = secondaryMemoDao.findByIdWithTags(memoId);
+                if (foundMemo == null) {
+                    throw new IllegalArgumentException("메모를 찾을 수 없습니다.");
+                }
+                return foundMemo;
+            }
         );
         
         if (!memo.getUser().getId().equals(user.getId())) {
@@ -265,55 +318,43 @@ public class MemoService {
             throw new IllegalArgumentException("권한이 없습니다.");
         }
         
-        // DELETE는 보상 트랜잭션이 복잡하므로 로깅만 수행
-        dualMasterWriteService.writeWithDualWrite(
-            // Primary: JPA Repository 사용
-            () -> {
-                memoRepository.delete(memo);
-                return null;
-            },
+        // Primary 선 삭제, Secondary는 베스트 에포트로 처리
+        // Secondary 실패 시에도 예외를 던지지 않고 UI에 즉시 반영될 수 있도록 함
+        // (Secondary 정리는 관리자/Recovery Queue로 처리)
+        // 1) Primary 삭제
+        memoRepository.delete(memo);
+        
+        // 2) Secondary 삭제 시도 (베스트 에포트)
+        try {
+            NamedParameterJdbcTemplate namedTemplate = secondaryNamedParameterJdbcTemplate;
             
-            // Secondary: JdbcTemplate 사용
-            (jdbcTemplate, result) -> {
-                NamedParameterJdbcTemplate namedTemplate = secondaryNamedParameterJdbcTemplate;
-                
-                // memo_tags 삭제 (CASCADE로 자동 삭제되지만 명시적으로 처리)
-                String deleteMemoTagsSql = "DELETE FROM memo_tags WHERE memo_id = :memoId";
-                Map<String, Object> deleteTagsParams = new java.util.HashMap<>();
-                deleteTagsParams.put("memoId", memoId);
-                namedTemplate.update(deleteMemoTagsSql, deleteTagsParams);
-                
-                // memo 삭제
-                String deleteMemoSql = "DELETE FROM memo WHERE id = :id";
-                Map<String, Object> deleteParams = new java.util.HashMap<>();
-                deleteParams.put("id", memoId);
-                namedTemplate.update(deleteMemoSql, deleteParams);
-                
-                return null;
-            },
+            String deleteMemoTagsSql = "DELETE FROM memo_tags WHERE memo_id = :memoId";
+            Map<String, Object> deleteTagsParams = new java.util.HashMap<>();
+            deleteTagsParams.put("memoId", memoId);
+            namedTemplate.update(deleteMemoTagsSql, deleteTagsParams);
             
-            // 보상 트랜잭션: DELETE의 보상은 복구가 어려우므로 Recovery Queue에 발행
-            (result) -> {
-                // DELETE 보상 트랜잭션은 Primary 복구가 불가능하지만,
-                // Secondary에 유령 데이터가 남을 수 있으므로 Recovery Queue에 발행
-                com.readingtracker.server.service.recovery.CompensationFailureEvent event = 
-                    new com.readingtracker.server.service.recovery.CompensationFailureEvent(
-                        "DELETE_SECONDARY_CLEANUP",
-                        memoId,
-                        "Memo",
-                        "Secondary",
-                        java.time.Instant.now(),
-                        "Primary DELETE 성공 후 Secondary DELETE 실패로 인한 유령 데이터 정리 필요"
-                    );
-                
+            String deleteMemoSql = "DELETE FROM memo WHERE id = :id";
+            Map<String, Object> deleteParams = new java.util.HashMap<>();
+            deleteParams.put("id", memoId);
+            namedTemplate.update(deleteMemoSql, deleteParams);
+        } catch (Exception secondaryError) {
+            log.warn("Secondary DB 메모 삭제 실패, Recovery Queue에 정리 요청 발행. memoId={}, error={}", memoId, secondaryError.getMessage());
+            // Secondary 정리를 위해 Recovery Queue에 발행
+            com.readingtracker.server.service.recovery.CompensationFailureEvent event = 
+                new com.readingtracker.server.service.recovery.CompensationFailureEvent(
+                    "DELETE_SECONDARY_CLEANUP",
+                    memoId,
+                    "Memo",
+                    "Secondary",
+                    java.time.Instant.now(),
+                    "Primary DELETE 성공 후 Secondary DELETE 실패"
+                );
+            try {
                 recoveryQueueService.publish(event);
-                org.slf4j.LoggerFactory.getLogger(MemoService.class)
-                    .warn("DELETE 보상 트랜잭션: Secondary 유령 데이터 정리를 위해 Recovery Queue에 발행 (memoId: {})", memoId);
-                
-                return null;
-            },
-            "Memo"  // 엔티티 타입 (Recovery Queue 발행용)
-        );
+            } catch (Exception queueError) {
+                log.error("Recovery Queue 발행 실패: memoId={}, error={}", memoId, queueError.getMessage());
+            }
+        }
     }
     
     /**
@@ -365,10 +406,14 @@ public class MemoService {
         LocalDateTime[] dateRange = calculateDateRange(date);
         
         // Dual Read Failover 적용
-        List<Memo> memos = dualMasterReadService.readWithFailover(() -> 
-            memoRepository.findByUserIdAndDateOrderByBookAndMemoStartTimeAsc(
-                user.getId(), dateRange[0], dateRange[1]
-            )
+        List<Memo> memos = dualMasterReadService.readWithFailover(
+            () -> memoRepository.findByUserIdAndDateOrderByBookAndMemoStartTimeAsc(
+                user.getId(), dateRange[0], dateRange[1]),
+            () -> {
+                List<Memo> foundMemos = secondaryMemoDao.findByUserIdAndDateOrderByBookAndMemoStartTimeAsc(
+                    user.getId(), dateRange[0], dateRange[1]);
+                return secondaryMemoDao.loadTagsForMemos(foundMemos);
+            }
         );
         
         // null 체크: userShelfBook이 null인 메모는 필터링
@@ -442,10 +487,14 @@ public class MemoService {
         LocalDateTime[] dateRange = calculateDateRange(date);
         
         // Dual Read Failover 적용
-        List<Memo> memos = dualMasterReadService.readWithFailover(() -> 
-            memoRepository.findByUserIdAndDateOrderByMemoStartTimeAsc(
-                user.getId(), dateRange[0], dateRange[1]
-            )
+        List<Memo> memos = dualMasterReadService.readWithFailover(
+            () -> memoRepository.findByUserIdAndDateOrderByMemoStartTimeAsc(
+                user.getId(), dateRange[0], dateRange[1]),
+            () -> {
+                List<Memo> foundMemos = secondaryMemoDao.findByUserIdAndDateOrderByMemoStartTimeAsc(
+                    user.getId(), dateRange[0], dateRange[1]);
+                return secondaryMemoDao.loadTagsForMemos(foundMemos);
+            }
         );
         
         // 대표 태그 결정 헬퍼 메서드
@@ -584,10 +633,14 @@ public class MemoService {
         LocalDateTime[] dateRange = calculateDateRange(date);
         
         // Dual Read Failover 적용
-        return dualMasterReadService.readWithFailover(() -> 
-            memoRepository.findByUserIdAndUserShelfBookIdAndDate(
-                user.getId(), userBookId, dateRange[0], dateRange[1]
-            )
+        return dualMasterReadService.readWithFailover(
+            () -> memoRepository.findByUserIdAndUserShelfBookIdAndDate(
+                user.getId(), userBookId, dateRange[0], dateRange[1]),
+            () -> {
+                List<Memo> foundMemos = secondaryMemoDao.findByUserIdAndUserShelfBookIdAndDate(
+                    user.getId(), userBookId, dateRange[0], dateRange[1]);
+                return secondaryMemoDao.loadTagsForMemos(foundMemos);
+            }
         );
     }
     
@@ -622,10 +675,14 @@ public class MemoService {
         
         // 날짜 제한 없이 모든 메모 조회 (타임라인 순서)
         // Dual Read Failover 적용
-        return dualMasterReadService.readWithFailover(() -> 
-            memoRepository.findByUserIdAndUserShelfBookIdOrderByMemoStartTimeAsc(
-                user.getId(), userBookId
-            )
+        return dualMasterReadService.readWithFailover(
+            () -> memoRepository.findByUserIdAndUserShelfBookIdOrderByMemoStartTimeAsc(
+                user.getId(), userBookId),
+            () -> {
+                List<Memo> foundMemos = secondaryMemoDao.findByUserIdAndUserShelfBookIdOrderByMemoStartTimeAsc(
+                    user.getId(), userBookId);
+                return secondaryMemoDao.loadTagsForMemos(foundMemos);
+            }
         );
     }
     
@@ -658,10 +715,11 @@ public class MemoService {
         
         // 최근 기간 내에 메모가 작성된 책 ID 목록 조회 (최신 메모 작성 시간 기준 정렬)
         // Dual Read Failover 적용
-        List<Object[]> results = dualMasterReadService.readWithFailover(() -> 
-            memoRepository.findUserShelfBookIdsWithLastMemoTime(
-                user.getId(), startDate
-            )
+        List<Object[]> results = dualMasterReadService.readWithFailover(
+            () -> memoRepository.findUserShelfBookIdsWithLastMemoTime(
+                user.getId(), startDate),
+            () -> secondaryMemoDao.findUserShelfBookIdsWithLastMemoTime(
+                user.getId(), startDate)
         );
         
         // 책 ID 목록 추출
@@ -902,10 +960,11 @@ public class MemoService {
         LocalDateTime startOfNextMonth = startOfMonth.plusMonths(1);
         
         // Dual Read Failover 적용
-        List<LocalDateTime> memoStartTimes = dualMasterReadService.readWithFailover(() -> 
-            memoRepository.findMemoStartTimesByUserIdAndYearAndMonth(
-                user.getId(), startOfMonth, startOfNextMonth
-            )
+        List<LocalDateTime> memoStartTimes = dualMasterReadService.readWithFailover(
+            () -> memoRepository.findMemoStartTimesByUserIdAndYearAndMonth(
+                user.getId(), startOfMonth, startOfNextMonth),
+            () -> secondaryMemoDao.findMemoStartTimesByUserIdAndYearAndMonth(
+                user.getId(), startOfMonth, startOfNextMonth)
         );
         
         // LocalDateTime에서 날짜만 추출하여 중복 제거 및 정렬

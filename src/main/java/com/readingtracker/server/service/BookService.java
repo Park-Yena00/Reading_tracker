@@ -6,8 +6,11 @@ import com.readingtracker.dbms.entity.Book;
 import com.readingtracker.dbms.entity.UserShelfBook;
 import com.readingtracker.dbms.repository.primary.BookRepository;
 import com.readingtracker.dbms.repository.primary.UserShelfBookRepository;
+import com.readingtracker.dbms.repository.secondary.SecondaryUserShelfBookDao;
 import com.readingtracker.server.service.write.DualMasterWriteService;
 import com.readingtracker.server.dto.UserShelfBookCacheDTO;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.redis.core.RedisTemplate;
@@ -27,6 +30,8 @@ import java.util.concurrent.TimeUnit;
 @Service
 // @Transactional 제거 (Dual Write를 위해)
 public class BookService {
+    
+    private static final Logger log = LoggerFactory.getLogger(BookService.class);
     
     @Autowired
     private BookRepository bookRepository;
@@ -52,6 +57,9 @@ public class BookService {
     
     @Autowired
     private com.readingtracker.server.service.read.DualMasterReadService dualMasterReadService;
+    
+    @Autowired
+    private SecondaryUserShelfBookDao secondaryUserShelfBookDao;
     
     @Autowired
     private com.readingtracker.server.mapper.BookMapper bookMapper;
@@ -221,19 +229,36 @@ public class BookService {
      * @return 업데이트된 UserShelfBook 엔티티
      */
     private UserShelfBook updateUserShelfBookWithDualWrite(UserShelfBook userShelfBook) {
-        // 이전 상태 저장 (보상 트랜잭션용)
-        UserShelfBook originalState = new UserShelfBook();
-        originalState.setId(userShelfBook.getId());
-        originalState.setCategory(userShelfBook.getCategory());
-        originalState.setCategoryManuallySet(userShelfBook.isCategoryManuallySet());
-        originalState.setExpectation(userShelfBook.getExpectation());
-        originalState.setReadingStartDate(userShelfBook.getReadingStartDate());
-        originalState.setReadingProgress(userShelfBook.getReadingProgress());
-        originalState.setPurchaseType(userShelfBook.getPurchaseType());
-        originalState.setReadingFinishedDate(userShelfBook.getReadingFinishedDate());
-        originalState.setRating(userShelfBook.getRating());
-        originalState.setReview(userShelfBook.getReview());
-        originalState.setUpdatedAt(userShelfBook.getUpdatedAt());
+        // UPDATE 전 원래 상태를 DB에서 조회 (보상 트랜잭션용)
+        // 주의: userShelfBook은 이미 업데이트된 필드값을 가지고 있으므로, DB에서 원래 상태를 조회해야 함
+        final UserShelfBook originalState;
+        if (userShelfBook.getId() != null) {
+            Optional<UserShelfBook> existingBook = userBookRepository.findById(userShelfBook.getId());
+            if (existingBook.isPresent()) {
+                // DB에서 조회한 원래 상태를 복사
+                UserShelfBook existing = existingBook.get();
+                originalState = new UserShelfBook();
+                originalState.setId(existing.getId());
+                originalState.setCategory(existing.getCategory());
+                originalState.setCategoryManuallySet(existing.isCategoryManuallySet());
+                originalState.setExpectation(existing.getExpectation());
+                originalState.setReadingStartDate(existing.getReadingStartDate());
+                originalState.setReadingProgress(existing.getReadingProgress());
+                originalState.setPurchaseType(existing.getPurchaseType());
+                originalState.setReadingFinishedDate(existing.getReadingFinishedDate());
+                originalState.setRating(existing.getRating());
+                originalState.setReview(existing.getReview());
+                originalState.setUpdatedAt(existing.getUpdatedAt());
+            } else {
+                // ID가 있지만 DB에 없는 경우 (이상 상황)
+                log.warn("보상 트랜잭션용 원래 상태 조회 실패: userBookId={}", userShelfBook.getId());
+                originalState = null;
+            }
+        } else {
+            // ID가 없는 경우 (이상 상황)
+            log.warn("보상 트랜잭션용 원래 상태 조회 실패: userBookId가 null입니다.");
+            originalState = null;
+        }
         
         return dualMasterWriteService.writeWithDualWrite(
             // Primary: JPA Repository 사용
@@ -271,18 +296,28 @@ public class BookService {
             
             // 보상 트랜잭션: Primary에서 원래 상태로 복구
             (updatedUserShelfBook) -> {
-                if (updatedUserShelfBook != null) {
-                    userShelfBook.setCategory(originalState.getCategory());
-                    userShelfBook.setCategoryManuallySet(originalState.isCategoryManuallySet());
-                    userShelfBook.setExpectation(originalState.getExpectation());
-                    userShelfBook.setReadingStartDate(originalState.getReadingStartDate());
-                    userShelfBook.setReadingProgress(originalState.getReadingProgress());
-                    userShelfBook.setPurchaseType(originalState.getPurchaseType());
-                    userShelfBook.setReadingFinishedDate(originalState.getReadingFinishedDate());
-                    userShelfBook.setRating(originalState.getRating());
-                    userShelfBook.setReview(originalState.getReview());
-                    userShelfBook.setUpdatedAt(originalState.getUpdatedAt());
-                    userBookRepository.save(userShelfBook);
+                if (updatedUserShelfBook != null && originalState != null) {
+                    // 원래 상태로 복구
+                    UserShelfBook bookToRestore = userBookRepository.findById(updatedUserShelfBook.getId())
+                        .orElseThrow(() -> new IllegalStateException("보상 트랜잭션: 복구할 엔티티를 찾을 수 없습니다. userBookId=" + updatedUserShelfBook.getId()));
+                    
+                    bookToRestore.setCategory(originalState.getCategory());
+                    bookToRestore.setCategoryManuallySet(originalState.isCategoryManuallySet());
+                    bookToRestore.setExpectation(originalState.getExpectation());
+                    bookToRestore.setReadingStartDate(originalState.getReadingStartDate());
+                    bookToRestore.setReadingProgress(originalState.getReadingProgress());
+                    bookToRestore.setPurchaseType(originalState.getPurchaseType());
+                    bookToRestore.setReadingFinishedDate(originalState.getReadingFinishedDate());
+                    bookToRestore.setRating(originalState.getRating());
+                    bookToRestore.setReview(originalState.getReview());
+                    bookToRestore.setUpdatedAt(originalState.getUpdatedAt());
+                    
+                    // DB에 저장하여 롤백 완료
+                    userBookRepository.save(bookToRestore);
+                    log.info("보상 트랜잭션: Primary DB에서 원래 상태로 복구 완료. userBookId={}", updatedUserShelfBook.getId());
+                } else {
+                    log.warn("보상 트랜잭션: 원래 상태가 없어 복구할 수 없습니다. userBookId={}", 
+                            updatedUserShelfBook != null ? updatedUserShelfBook.getId() : "null");
                 }
                 return null;
             },
@@ -454,13 +489,22 @@ public class BookService {
         
         // 4. DB 조회 (Dual Read Failover 적용)
         final BookCategory finalCategory = category; // effectively final
-        List<UserShelfBook> books = dualMasterReadService.readWithFailover(() -> {
-            if (finalCategory != null) {
-                return getMyShelfByCategoryAndSort(userId, finalCategory, finalSortBy);
-            } else {
-                return getMyShelfBySort(userId, finalSortBy);
+        List<UserShelfBook> books = dualMasterReadService.readWithFailover(
+            () -> {
+                if (finalCategory != null) {
+                    return getMyShelfByCategoryAndSort(userId, finalCategory, finalSortBy);
+                } else {
+                    return getMyShelfBySort(userId, finalSortBy);
+                }
+            },
+            () -> {
+                if (finalCategory != null) {
+                    return getMyShelfByCategoryAndSortSecondary(userId, finalCategory, finalSortBy);
+                } else {
+                    return getMyShelfBySortSecondary(userId, finalSortBy);
+                }
             }
-        });
+        );
         
         // 5. Mapper를 통해 엔티티를 DTO로 변환하여 Redis에 저장 (TTL: 5분)
         List<UserShelfBookCacheDTO> dtos = bookMapper.toUserShelfBookCacheDTOList(books);
@@ -492,7 +536,7 @@ public class BookService {
     }
     
     /**
-     * 카테고리별 정렬된 내 서재 조회
+     * 카테고리별 정렬된 내 서재 조회 (Primary - JPA Repository)
      */
     private List<UserShelfBook> getMyShelfByCategoryAndSort(Long userId, BookCategory category, BookSortCriteria sortBy) {
         switch (sortBy) {
@@ -510,7 +554,25 @@ public class BookService {
     }
     
     /**
-     * 정렬된 내 서재 조회 (카테고리 없음)
+     * 카테고리별 정렬된 내 서재 조회 (Secondary - JdbcTemplate DAO)
+     */
+    private List<UserShelfBook> getMyShelfByCategoryAndSortSecondary(Long userId, BookCategory category, BookSortCriteria sortBy) {
+        switch (sortBy) {
+            case TITLE:
+                return secondaryUserShelfBookDao.findByUserIdAndCategoryOrderByTitleAsc(userId, category);
+            case AUTHOR:
+                return secondaryUserShelfBookDao.findByUserIdAndCategoryOrderByAuthorAsc(userId, category);
+            case PUBLISHER:
+                return secondaryUserShelfBookDao.findByUserIdAndCategoryOrderByPublisherAsc(userId, category);
+            case GENRE:
+                return secondaryUserShelfBookDao.findByUserIdAndCategoryOrderByGenreAsc(userId, category);
+            default:
+                return secondaryUserShelfBookDao.findByUserIdAndCategoryOrderByTitleAsc(userId, category);
+        }
+    }
+    
+    /**
+     * 정렬된 내 서재 조회 (카테고리 없음) - Primary
      */
     private List<UserShelfBook> getMyShelfBySort(Long userId, BookSortCriteria sortBy) {
         switch (sortBy) {
@@ -524,6 +586,24 @@ public class BookService {
                 return userBookRepository.findByUserIdOrderByGenreAsc(userId);
             default:
                 return userBookRepository.findByUserIdOrderByTitleAsc(userId);
+        }
+    }
+    
+    /**
+     * 정렬된 내 서재 조회 (카테고리 없음) - Secondary
+     */
+    private List<UserShelfBook> getMyShelfBySortSecondary(Long userId, BookSortCriteria sortBy) {
+        switch (sortBy) {
+            case TITLE:
+                return secondaryUserShelfBookDao.findByUserIdOrderByTitleAsc(userId);
+            case AUTHOR:
+                return secondaryUserShelfBookDao.findByUserIdOrderByAuthorAsc(userId);
+            case PUBLISHER:
+                return secondaryUserShelfBookDao.findByUserIdOrderByPublisherAsc(userId);
+            case GENRE:
+                return secondaryUserShelfBookDao.findByUserIdOrderByGenreAsc(userId);
+            default:
+                return secondaryUserShelfBookDao.findByUserIdOrderByTitleAsc(userId);
         }
     }
     

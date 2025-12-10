@@ -51,6 +51,7 @@ public interface BookMapper {
      * UserShelfBook → BookAdditionResponse 변환
      */
     @Mapping(target = "message", constant = "책이 내 서재에 추가되었습니다.")
+    @Mapping(target = "userBookId", source = "id")
     @Mapping(target = "bookId", source = "book.id")
     @Mapping(target = "title", source = "book.title")
     @Mapping(target = "category", source = "category")

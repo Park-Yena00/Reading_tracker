@@ -1,3 +1,4 @@
+C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\dbms\repository\secondary\SecondaryUserShelfBookDao.java
 C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\server\dto\responseDTO\LoginResponse.java
 C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\server\controller\v1\BookSearchController.java
 C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\server\service\alert\AlertService.java
@@ -26,6 +27,8 @@ C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\server\co
 C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\server\controller\v1\AuthController.java
 C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\server\dto\requestDTO\FinishReadingRequest.java
 C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\dbms\entity\User.java
+C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\dbms\repository\secondary\SecondaryUserDao.java
+C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\dbms\repository\secondary\SecondaryUserDeviceDao.java
 C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\server\dto\responseDTO\TagMemoGroup.java
 C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\server\dto\requestDTO\PasswordResetRequest.java
 C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\server\dto\requestDTO\BookAdditionRequest.java
@@ -43,6 +46,7 @@ C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\server\ma
 C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\server\service\JwtService.java
 C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\server\common\util\PasswordValidator.java
 C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\server\config\SecurityConfig.java
+C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\dbms\repository\secondary\SecondaryMemoDao.java
 C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\server\dto\responseDTO\BookDetailResponse.java
 C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\server\config\RedisConfig.java
 C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\server\dto\responseDTO\RefreshTokenResponse.java
@@ -72,6 +76,7 @@ C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\server\se
 C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\ReadingTrackerApplication.java
 C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\server\config\PasswordConfig.java
 C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\server\mapper\MemoMapper.java
+C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\dbms\repository\secondary\SecondaryPasswordResetTokenDao.java
 C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\server\config\DualMasterDataSourceConfig.java
 C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\server\controller\v1\BookShelfController.java
 C:\Users\woori\Desktop\분산2_프로젝트\src\main\java\com\readingtracker\server\controller\v1\HealthController.java

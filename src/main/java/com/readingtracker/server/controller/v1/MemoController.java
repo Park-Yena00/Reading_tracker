@@ -5,7 +5,6 @@ import com.readingtracker.dbms.entity.TagCategory;
 import com.readingtracker.dbms.entity.User;
 import com.readingtracker.dbms.entity.UserShelfBook;
 import com.readingtracker.dbms.repository.primary.TagRepository;
-import com.readingtracker.dbms.repository.primary.UserRepository;
 import com.readingtracker.dbms.repository.primary.UserShelfBookRepository;
 import com.readingtracker.server.dto.ApiResponse;
 import com.readingtracker.server.dto.requestDTO.CloseBookRequest;
@@ -49,7 +48,7 @@ public class MemoController extends BaseV1Controller {
     private MemoMapper memoMapper;
     
     @Autowired
-    private UserRepository userRepository;
+    private com.readingtracker.server.service.UserService userService;
     
     @Autowired
     private UserShelfBookRepository userShelfBookRepository;
@@ -131,8 +130,7 @@ public class MemoController extends BaseV1Controller {
     @PutMapping("/memos/{memoId}")
     @Operation(
         summary = "메모 수정",
-        description = "작성한 메모의 내용과 태그를 수정합니다. " +
-                     "pageNumber는 메모 작성 시점의 시작 위치를 나타내는 메타데이터이므로 수정할 수 없습니다.",
+        description = "작성한 메모의 내용, 태그, 페이지 번호를 수정합니다.",
         security = @SecurityRequirement(name = "bearerAuth")
     )
     public ApiResponse<MemoResponse> updateMemo(
@@ -411,12 +409,16 @@ public class MemoController extends BaseV1Controller {
     
     /**
      * 현재 로그인한 사용자 조회 헬퍼 메서드
+     * Dual Read 적용: Primary에서 읽기 시도, 실패 시 Secondary로 Failover
      */
     private User getCurrentUser() {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         String loginId = (String) authentication.getPrincipal();
-        return userRepository.findActiveUserByLoginId(loginId)
-            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
+        User user = userService.findActiveUserByLoginId(loginId);
+        if (user == null) {
+            throw new IllegalArgumentException("사용자를 찾을 수 없습니다.");
+        }
+        return user;
     }
 }
 

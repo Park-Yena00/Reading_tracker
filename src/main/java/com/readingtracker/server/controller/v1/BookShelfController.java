@@ -16,7 +16,6 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 
 import com.readingtracker.dbms.entity.User;
 import com.readingtracker.dbms.entity.UserShelfBook;
-import com.readingtracker.dbms.repository.primary.UserRepository;
 import com.readingtracker.dbms.repository.primary.UserShelfBookRepository;
 import com.readingtracker.server.common.constant.BookCategory;
 import com.readingtracker.server.common.constant.BookSortCriteria;
@@ -29,6 +28,7 @@ import com.readingtracker.server.dto.responseDTO.BookAdditionResponse;
 import com.readingtracker.server.dto.responseDTO.MyShelfResponse;
 import com.readingtracker.server.mapper.BookMapper;
 import com.readingtracker.server.service.BookService;
+import com.readingtracker.server.service.UserService;
 
 @RestController
 @RequestMapping("/api/v1")
@@ -42,7 +42,7 @@ public class BookShelfController extends BaseV1Controller {
     private BookMapper bookMapper;
     
     @Autowired
-    private UserRepository userRepository;
+    private UserService userService;
     
     @Autowired
     private UserShelfBookRepository userShelfBookRepository;
@@ -65,9 +65,11 @@ public class BookShelfController extends BaseV1Controller {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         String loginId = (String) authentication.getPrincipal();
         
-        // 사용자 조회
-        User user = userRepository.findActiveUserByLoginId(loginId)
-            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
+        // 사용자 조회 (Dual Read 적용: Primary에서 읽기 시도, 실패 시 Secondary로 Failover)
+        User user = userService.findActiveUserByLoginId(loginId);
+        if (user == null) {
+            throw new IllegalArgumentException("사용자를 찾을 수 없습니다.");
+        }
         
         // Mapper를 통해 RequestDTO → Entity 변환 (문서: MAPSTRUCT_ARCHITECTURE_DESIGN.md 준수)
         UserShelfBook userShelfBook = bookMapper.toUserShelfBookEntity(request);
@@ -103,9 +105,11 @@ public class BookShelfController extends BaseV1Controller {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         String loginId = (String) authentication.getPrincipal();
         
-        // 사용자 조회
-        User user = userRepository.findActiveUserByLoginId(loginId)
-            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
+        // 사용자 조회 (Dual Read 적용: Primary에서 읽기 시도, 실패 시 Secondary로 Failover)
+        User user = userService.findActiveUserByLoginId(loginId);
+        if (user == null) {
+            throw new IllegalArgumentException("사용자를 찾을 수 없습니다.");
+        }
         
         // 내 서재 조회 (Entity 반환)
         List<UserShelfBook> userBooks = bookService.getMyShelf(user.getId(), category, sortBy);
@@ -134,9 +138,11 @@ public class BookShelfController extends BaseV1Controller {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         String loginId = (String) authentication.getPrincipal();
         
-        // 사용자 조회
-        User user = userRepository.findActiveUserByLoginId(loginId)
-            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
+        // 사용자 조회 (Dual Read 적용: Primary에서 읽기 시도, 실패 시 Secondary로 Failover)
+        User user = userService.findActiveUserByLoginId(loginId);
+        if (user == null) {
+            throw new IllegalArgumentException("사용자를 찾을 수 없습니다.");
+        }
         
         // UserShelfBook 조회 및 소유권 확인
         if (userBookId == null) {
@@ -175,9 +181,11 @@ public class BookShelfController extends BaseV1Controller {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         String loginId = (String) authentication.getPrincipal();
         
-        // 사용자 조회
-        User user = userRepository.findActiveUserByLoginId(loginId)
-            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
+        // 사용자 조회 (Dual Read 적용: Primary에서 읽기 시도, 실패 시 Secondary로 Failover)
+        User user = userService.findActiveUserByLoginId(loginId);
+        if (user == null) {
+            throw new IllegalArgumentException("사용자를 찾을 수 없습니다.");
+        }
         
         // UserShelfBook 조회 및 소유권 확인
         if (userBookId == null) {
@@ -214,9 +222,11 @@ public class BookShelfController extends BaseV1Controller {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         String loginId = (String) authentication.getPrincipal();
         
-        // 사용자 조회
-        User user = userRepository.findActiveUserByLoginId(loginId)
-            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
+        // 사용자 조회 (Dual Read 적용: Primary에서 읽기 시도, 실패 시 Secondary로 Failover)
+        User user = userService.findActiveUserByLoginId(loginId);
+        if (user == null) {
+            throw new IllegalArgumentException("사용자를 찾을 수 없습니다.");
+        }
         
         // UserShelfBook 조회 및 소유권 확인
         if (userBookId == null) {
@@ -256,9 +266,11 @@ public class BookShelfController extends BaseV1Controller {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         String loginId = (String) authentication.getPrincipal();
         
-        // 사용자 조회
-        User user = userRepository.findActiveUserByLoginId(loginId)
-            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
+        // 사용자 조회 (Dual Read 적용: Primary에서 읽기 시도, 실패 시 Secondary로 Failover)
+        User user = userService.findActiveUserByLoginId(loginId);
+        if (user == null) {
+            throw new IllegalArgumentException("사용자를 찾을 수 없습니다.");
+        }
         
         // UserShelfBook 조회 및 소유권 확인
         if (userBookId == null) {
@@ -300,9 +312,11 @@ public class BookShelfController extends BaseV1Controller {
         Authentication authentication = SecurityContextHolder.getContext().getAuthentication();
         String loginId = (String) authentication.getPrincipal();
         
-        // 사용자 조회
-        User user = userRepository.findActiveUserByLoginId(loginId)
-            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
+        // 사용자 조회 (Dual Read 적용: Primary에서 읽기 시도, 실패 시 Secondary로 Failover)
+        User user = userService.findActiveUserByLoginId(loginId);
+        if (user == null) {
+            throw new IllegalArgumentException("사용자를 찾을 수 없습니다.");
+        }
         
         // UserShelfBook 조회 및 소유권 확인
         if (userBookId == null) {
