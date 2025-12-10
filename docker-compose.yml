@@ -12,8 +12,42 @@ services:
     networks:
       - reading-tracker-network
 
+  secondary-db:
+    image: mysql:8.0
+    container_name: reading-tracker-secondary-db
+    ports:
+      - "3307:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: Yenapark1000
+      MYSQL_DATABASE: reading_tracker
+      MYSQL_USER: reading_tracker
+      MYSQL_PASSWORD: Yenapark1000
+      TZ: Asia/Seoul
+    volumes:
+      - secondary-db-data:/var/lib/mysql
+      - ./mysql/init:/docker-entrypoint-initdb.d
+    command: 
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+09:00
+      - --server-id=2
+      - --log-bin=mysql-bin
+      - --binlog-format=ROW
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+    restart: unless-stopped
+    networks:
+      - reading-tracker-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pYenapark1000"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
 volumes:
   redis-data:
+    driver: local
+  secondary-db-data:
     driver: local
 
 networks:
