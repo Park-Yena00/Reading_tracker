@@ -17,12 +17,12 @@ C4Container
     System_Ext(aladin, "알라딘 Open API", "도서 검색 및 상세 정보 제공을 위한 외부 API")
     
     Container_Boundary(web, "웹 애플리케이션") {
-        Container(webapp, "웹 애플리케이션", "HTML5, CSS3, JavaScript", "사용자 인터페이스 제공, 오프라인 지원, IndexedDB 기반 로컬 저장소")
+        Container(webapp, "웹 애플리케이션", "HTML, CSS, JavaScript", "사용자 인터페이스 제공, 오프라인 지원, IndexedDB 기반 로컬 저장소")
         ContainerDb(indexeddb, "IndexedDB", "브라우저 내장 데이터베이스", "오프라인 메모 및 내 서재 정보 저장, 동기화 큐 관리")
     }
     
     Container_Boundary(api, "API 서버") {
-        Container(apiserver, "Spring Boot API 서버", "Spring Boot 3.2.0, Java 17", "RESTful API 제공, 비즈니스 로직 처리, 인증/인가")
+        Container(apiserver, "Spring Boot API 서버", "Spring Boot 3.2.0, Java 17, Spring MVC", "RESTful API 제공, 비즈니스 로직 처리, 인증/인가")
     }
     
     Container_Boundary(database, "데이터베이스") {
@@ -36,7 +36,7 @@ C4Container
     
     Rel(user, webapp, "사용", "HTTPS")
     Rel(webapp, indexeddb, "읽기/쓰기", "로컬 저장소")
-    Rel(webapp, apiserver, "API 호출", "HTTPS/REST")
+    Rel(webapp, apiserver, "API 호출", "HTTPS/REST, Spring MVC")
     Rel(apiserver, primarydb, "읽기/쓰기", "JDBC, JPA")
     Rel(apiserver, secondarydb, "읽기/쓰기", "JDBC, JdbcTemplate")
     Rel(apiserver, redis, "읽기/쓰기", "Redis Client")
