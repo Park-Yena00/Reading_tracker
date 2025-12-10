@@ -34,22 +34,21 @@ sequenceDiagram
     participant SyncQueueMgr as SyncQueueManager
     participant IndexedDB as IndexedDB
 
-    Note over User,IndexedDB: Phase 1: 오프라인 상태에서 메모 생성
+    Note right of User: Phase 1: 오프라인 상태에서<br/>메모 생성
     User->>UI: 메모 작성 요청
     UI->>MemoService: createMemo(memoData)
     MemoService->>NetworkMonitor: isOnline 확인
     NetworkMonitor-->>MemoService: false (오프라인)
     
     MemoService->>OfflineService: createMemo(memoData)
-    OfflineService->>OfflineService: 로컬 ID 생성 (UUID v4)
-    OfflineService->>OfflineService: 멱등성 키 생성
+    Note left of OfflineService: 로컬 ID 생성<br/>(UUID v4)<br/>멱등성 키 생성
     OfflineService->>IndexedDB: saveMemo(localMemo)
-    Note over IndexedDB: offline_memos 테이블에 저장<br/>syncStatus: 'pending'<br/>serverId: null
+    Note right of IndexedDB: offline_memos 저장<br/>syncStatus: 'pending'<br/>serverId: null
     IndexedDB-->>OfflineService: 저장 완료
     
-    OfflineService->>SyncQueueMgr: enqueue({type: 'CREATE',<br/>localMemoId,<br/>idempotencyKey})
-    SyncQueueMgr->>IndexedDB: sync_queue 테이블에 저장
-    Note over IndexedDB: sync_queue 테이블에 저장<br/>status: 'PENDING'<br/>type: 'CREATE'
+    OfflineService->>SyncQueueMgr: enqueue(CREATE,<br/>localMemoId,<br/>idempotencyKey)
+    SyncQueueMgr->>IndexedDB: sync_queue 저장
+    Note right of IndexedDB: sync_queue 저장<br/>status: 'PENDING'<br/>type: 'CREATE'
     IndexedDB-->>SyncQueueMgr: 저장 완료
     SyncQueueMgr-->>OfflineService: queueItem 반환
     OfflineService-->>MemoService: localMemo 반환
@@ -70,19 +69,19 @@ sequenceDiagram
     participant IndexedDB as IndexedDB
     participant ServerAPI as Server API<br/>(Primary/Secondary DB)
 
-    Note over NetworkMonitor,ServerAPI: Phase 2: 네트워크 재연결 감지
-    NetworkMonitor->>NetworkMonitor: window.addEventListener('online')
-    NetworkMonitor->>NetworkMonitor: 1초 대기 (네트워크 안정화)
-    NetworkMonitor->>ServerAPI: 2-Phase Health Check<br/>Phase 1: /api/v1/health
+    Note right of NetworkMonitor: Phase 2: 네트워크<br/>재연결 감지
+    NetworkMonitor->>NetworkMonitor: window.addEventListener<br/>('online')
+    Note left of NetworkMonitor: 1초 대기<br/>(네트워크 안정화)
+    NetworkMonitor->>ServerAPI: Health Check<br/>Phase 1: /api/v1/health
     ServerAPI-->>NetworkMonitor: Health Check 성공
-    NetworkMonitor->>ServerAPI: Phase 2: /api/v1/health/aladin
+    NetworkMonitor->>ServerAPI: Health Check<br/>Phase 2: /api/v1/health/aladin
     ServerAPI-->>NetworkMonitor: Health Check 성공
-    NetworkMonitor->>NetworkMonitor: networkStatusChanged 이벤트 발행
+    Note left of NetworkMonitor: networkStatusChanged<br/>이벤트 발행
     NetworkMonitor->>NetworkStateMgr: handleNetworkStatusChange(true)
     NetworkStateMgr->>NetworkStateMgr: transitionToOnline()
-    NetworkStateMgr->>EventBus: publish('network:online',<br/>{processQueue: true})
+    NetworkStateMgr->>EventBus: publish('network:online')
     
-    Note over NetworkMonitor,ServerAPI: Phase 3: 동기화 시작
+    Note right of EventBus: Phase 3: 동기화 시작
     EventBus->>OfflineService: 'network:online' 이벤트 수신<br/>(이벤트 구독)
     OfflineService->>OfflineService: syncPendingMemos()
     OfflineService->>SyncQueueMgr: getPendingItems()
@@ -106,35 +105,35 @@ sequenceDiagram
     participant EventBus as EventBus
     participant ServerAPI as Server API<br/>(Primary/Secondary DB)
 
-    Note over OfflineService,ServerAPI: Phase 4: 동기화 진행
+    Note right of OfflineService: Phase 4: 동기화 진행
     loop 각 PENDING 항목 순차 처리
-        OfflineService->>SyncQueueMgr: tryUpdateStatus('PENDING' → 'SYNCING')
+        OfflineService->>SyncQueueMgr: tryUpdateStatus<br/>(PENDING → SYNCING)
         SyncQueueMgr->>IndexedDB: 원자적 상태 변경
         IndexedDB-->>SyncQueueMgr: 상태 변경 성공
         
-        OfflineService->>IndexedDB: getMemoByLocalId(localMemoId)
+        OfflineService->>IndexedDB: getMemoByLocalId
         IndexedDB-->>OfflineService: localMemo 반환
         
         alt CREATE 작업
-            OfflineService->>ServerAPI: POST /api/v1/memos<br/>Headers: {'Idempotency-Key': idempotencyKey}
-            ServerAPI-->>OfflineService: MemoResponse (serverId 포함)
-            OfflineService->>IndexedDB: updateMemoWithServerId(localId, serverId)
-            Note over IndexedDB: syncStatus: 'synced'<br/>serverId: 업데이트
-            OfflineService->>SyncQueueMgr: markAsSuccess(queueItem.id)
+            OfflineService->>ServerAPI: POST /api/v1/memos<br/>Idempotency-Key 헤더
+            ServerAPI-->>OfflineService: MemoResponse<br/>(serverId 포함)
+            OfflineService->>IndexedDB: updateMemoWithServerId
+            Note right of IndexedDB: syncStatus: 'synced'<br/>serverId 업데이트
+            OfflineService->>SyncQueueMgr: markAsSuccess
         else UPDATE 작업
             OfflineService->>ServerAPI: PUT /api/v1/memos/{serverId}
             ServerAPI-->>OfflineService: MemoResponse
-            OfflineService->>IndexedDB: updateMemo(localMemo)
-            OfflineService->>SyncQueueMgr: markAsSuccess(queueItem.id)
+            OfflineService->>IndexedDB: updateMemo
+            OfflineService->>SyncQueueMgr: markAsSuccess
         else DELETE 작업
             OfflineService->>ServerAPI: DELETE /api/v1/memos/{serverId}
             ServerAPI-->>OfflineService: 삭제 성공
-            OfflineService->>IndexedDB: deleteMemo(localId)
-            OfflineService->>SyncQueueMgr: markAsSuccess(queueItem.id)
+            OfflineService->>IndexedDB: deleteMemo
+            OfflineService->>SyncQueueMgr: markAsSuccess
         end
         
-        OfflineService->>SyncStateMgr: updateSyncProgress(1, remainingCount)
-        SyncStateMgr->>EventBus: publish('sync:progress',<br/>{completedCount, remainingCount})
+        OfflineService->>SyncStateMgr: updateSyncProgress
+        SyncStateMgr->>EventBus: publish('sync:progress')
     end
 ```
 
@@ -153,19 +152,18 @@ sequenceDiagram
     participant NetworkMonitor as NetworkMonitor
     participant ServerAPI as Server API<br/>(Primary/Secondary DB)
 
-    Note over OfflineService,EventBus: Phase 5: 동기화 완료
+    Note right of OfflineService: Phase 5: 동기화 완료
     OfflineService->>SyncStateMgr: checkSyncComplete()
     SyncStateMgr->>SyncQueueMgr: getPendingItems()
-    SyncQueueMgr->>IndexedDB: sync_queue에서 PENDING 항목 조회
+    SyncQueueMgr->>IndexedDB: PENDING 항목 조회
     IndexedDB-->>SyncQueueMgr: PENDING 항목 없음
     SyncQueueMgr-->>SyncStateMgr: pendingItems.length === 0
-    SyncStateMgr->>SyncStateMgr: setSyncComplete()
-    SyncStateMgr->>SyncStateMgr: isSyncing = false
-    SyncStateMgr->>EventBus: publish('sync:complete',<br/>{duration})
+    SyncStateMgr->>SyncStateMgr: setSyncComplete()<br/>isSyncing = false
+    SyncStateMgr->>EventBus: publish('sync:complete')
     
-    Note over User,ServerAPI: Phase 6: 동기화 완료 후 서버DB 우선 전환
+    Note right of User: Phase 6: 동기화 완료 후<br/>서버DB 우선 전환
     User->>UI: 메모 조회 요청
-    UI->>MemoService: getMemosByBook(userBookId)
+    UI->>MemoService: getMemosByBook
     MemoService->>NetworkMonitor: isOnline 확인
     NetworkMonitor-->>MemoService: true (온라인)
     MemoService->>SyncStateMgr: isSyncing 확인
@@ -176,18 +174,18 @@ sequenceDiagram
     SyncStateMgr-->>MemoService: true (동기화 완료)
     
     MemoService->>ServerAPI: GET /api/v1/memos/books/{userBookId}
-    Note over ServerAPI: DualMasterReadService.readWithFailover()<br/>Primary DB → Secondary DB (Failover)
+    Note left of ServerAPI: DualMasterReadService<br/>readWithFailover()<br/>Primary → Secondary
     ServerAPI-->>MemoService: MemoResponse 리스트
     
     loop 각 서버 메모
-        MemoService->>MemoService: MemoOperationHelper.saveServerMemoAsLocal(serverMemo)
+        MemoService->>MemoService: saveServerMemoAsLocal
         MemoService->>IndexedDB: saveMemo(serverMemo)
-        Note over IndexedDB: 최근 7일 메모만 저장
+        Note right of IndexedDB: 최근 7일<br/>메모만 저장
     end
     
-    MemoService->>MemoService: mergeMemos(localMemos, serverMemos)
+    MemoService->>MemoService: mergeMemos
     MemoService-->>UI: 통합된 MemoResponse 리스트
-    UI-->>User: 메모 목록 표시 (서버DB 우선)
+    UI-->>User: 메모 목록 표시<br/>(서버DB 우선)
 ```
 
 ### Phase 7: 동기화 중 사용자 요청 큐잉 (선택적)
@@ -202,20 +200,20 @@ sequenceDiagram
     participant EventBus as EventBus
     participant ServerAPI as Server API<br/>(Primary/Secondary DB)
 
-    Note over User,ServerAPI: Phase 7: 동기화 중 사용자 요청 큐잉 (선택적)
+    Note right of User: Phase 7: 동기화 중<br/>사용자 요청 큐잉<br/>(선택적)
     alt 동기화 중 사용자 요청 발생
-        User->>UI: 메모 수정 요청 (동기화 중)
-        UI->>MemoService: updateMemo(memoId, memoData)
+        User->>UI: 메모 수정 요청<br/>(동기화 중)
+        UI->>MemoService: updateMemo
         MemoService->>SyncStateMgr: isSyncing 확인
         SyncStateMgr-->>MemoService: true (동기화 중)
-        MemoService->>RequestQueueMgr: enqueue(() => updateMemo(...),<br/>{type: 'update'})
-        RequestQueueMgr->>RequestQueueMgr: 큐에 저장
+        MemoService->>RequestQueueMgr: enqueue(updateMemo,<br/>{type: 'update'})
+        Note left of RequestQueueMgr: 큐에 저장
         RequestQueueMgr-->>MemoService: Promise 반환 (대기)
         
-        Note over RequestQueueMgr: 동기화 완료 대기
-        EventBus->>RequestQueueMgr: 'sync:complete' 이벤트 수신
+        Note left of RequestQueueMgr: 동기화 완료 대기
+        EventBus->>RequestQueueMgr: 'sync:complete'<br/>이벤트 수신
         RequestQueueMgr->>RequestQueueMgr: processQueue()
-        RequestQueueMgr->>MemoService: updateMemo(memoId, memoData) 재실행
+        RequestQueueMgr->>MemoService: updateMemo 재실행
         MemoService->>ServerAPI: PUT /api/v1/memos/{serverId}
         ServerAPI-->>MemoService: MemoResponse
         MemoService-->>RequestQueueMgr: 결과 반환

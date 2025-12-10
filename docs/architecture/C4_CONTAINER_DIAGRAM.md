@@ -36,9 +36,9 @@ C4Container
     
     Rel(user, webapp, "사용", "HTTPS")
     Rel(webapp, indexeddb, "읽기/쓰기", "로컬 저장소")
-    Rel(webapp, apiserver, "API 호출", "HTTPS/REST, Spring MVC")
-    Rel(apiserver, primarydb, "읽기/쓰기", "JDBC, JPA")
-    Rel(apiserver, secondarydb, "읽기/쓰기", "JDBC, JdbcTemplate")
+    Rel(webapp, apiserver, "API 호출", "HTTPS/REST<br/>Spring MVC")
+    Rel(apiserver, primarydb, "읽기/쓰기", "JDBC<br/>JPA")
+    Rel(apiserver, secondarydb, "읽기/쓰기", "JDBC<br/>JdbcTemplate")
     Rel(apiserver, redis, "읽기/쓰기", "Redis Client")
     Rel(apiserver, aladin, "도서 검색", "HTTPS")
     

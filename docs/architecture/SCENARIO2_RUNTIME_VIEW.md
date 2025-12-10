@@ -28,17 +28,16 @@ sequenceDiagram
     participant SecondaryDB as Secondary DB<br/>(MySQL)
 
     Client->>Controller: GET /api/v1/memos/books/{userBookId}
-    Controller->>Service: getAllBookMemos(userBookId)
+    Controller->>Service: getAllBookMemos
+    Service->>ReadService: readWithFailover
     
-    Service->>ReadService: readWithFailover(readOperation)
-    
-    Note over ReadService: Primary DB 읽기 시도
-    ReadService->>PrimaryDB: TransactionTemplate.execute()<br/>(JPA Repository 사용)
+    Note right of ReadService: Primary DB<br/>읽기 시도
+    ReadService->>PrimaryDB: TransactionTemplate.execute()<br/>(JPA Repository)
     PrimaryDB-->>ReadService: 데이터 반환 (성공)
     
     ReadService-->>Service: 읽기 결과 반환
     Service-->>Controller: MemoResponse 리스트
-    Controller-->>Client: 200 OK (메모 목록)
+    Controller-->>Client: 200 OK
 ```
 
 ### 시나리오 2-2: Primary DB 실패 → Secondary DB Failover 성공
@@ -53,21 +52,20 @@ sequenceDiagram
     participant SecondaryDB as Secondary DB<br/>(MySQL)
 
     Client->>Controller: GET /api/v1/memos/books/{userBookId}
-    Controller->>Service: getAllBookMemos(userBookId)
+    Controller->>Service: getAllBookMemos
+    Service->>ReadService: readWithFailover
     
-    Service->>ReadService: readWithFailover(readOperation)
-    
-    Note over ReadService: Primary DB 읽기 시도
-    ReadService->>PrimaryDB: TransactionTemplate.execute()<br/>(JPA Repository 사용)
+    Note right of ReadService: Primary DB<br/>읽기 시도
+    ReadService->>PrimaryDB: TransactionTemplate.execute()<br/>(JPA Repository)
     PrimaryDB-->>ReadService: Exception 발생 (실패)
     
-    Note over ReadService: Secondary DB로 Failover
-    ReadService->>SecondaryDB: TransactionTemplate.execute()<br/>(JPA Repository 사용)
+    Note left of ReadService: Secondary DB로<br/>Failover
+    ReadService->>SecondaryDB: TransactionTemplate.execute()<br/>(JPA Repository)
     SecondaryDB-->>ReadService: 데이터 반환 (성공)
     
     ReadService-->>Service: 읽기 결과 반환 (Failover)
     Service-->>Controller: MemoResponse 리스트
-    Controller-->>Client: 200 OK (메모 목록)
+    Controller-->>Client: 200 OK
 ```
 
 ### 시나리오 2-3: Primary DB 실패 → Secondary DB도 실패
@@ -82,21 +80,20 @@ sequenceDiagram
     participant SecondaryDB as Secondary DB<br/>(MySQL)
 
     Client->>Controller: GET /api/v1/memos/books/{userBookId}
-    Controller->>Service: getAllBookMemos(userBookId)
+    Controller->>Service: getAllBookMemos
+    Service->>ReadService: readWithFailover
     
-    Service->>ReadService: readWithFailover(readOperation)
-    
-    Note over ReadService: Primary DB 읽기 시도
-    ReadService->>PrimaryDB: TransactionTemplate.execute()<br/>(JPA Repository 사용)
+    Note right of ReadService: Primary DB<br/>읽기 시도
+    ReadService->>PrimaryDB: TransactionTemplate.execute()<br/>(JPA Repository)
     PrimaryDB-->>ReadService: Exception 발생 (실패)
     
-    Note over ReadService: Secondary DB로 Failover
-    ReadService->>SecondaryDB: TransactionTemplate.execute()<br/>(JPA Repository 사용)
+    Note left of ReadService: Secondary DB로<br/>Failover
+    ReadService->>SecondaryDB: TransactionTemplate.execute()<br/>(JPA Repository)
     SecondaryDB-->>ReadService: Exception 발생 (실패)
     
     ReadService-->>Service: DatabaseUnavailableException<br/>("모든 DB 접근 실패")
     Service-->>Controller: Exception 전파
-    Controller-->>Client: 503 Service Unavailable<br/>(DatabaseUnavailableException)
+    Controller-->>Client: 503 Service Unavailable
 ```
 
 ---
@@ -115,21 +112,20 @@ sequenceDiagram
     participant SecondaryDB as Secondary DB<br/>(MySQL)
 
     Client->>Controller: POST /api/v1/memos<br/>(PUT, DELETE)
-    Controller->>Service: createMemo(user, memo)<br/>(updateMemo, deleteMemo)
+    Controller->>Service: createMemo<br/>(updateMemo, deleteMemo)
+    Service->>WriteService: writeWithDualWrite
     
-    Service->>WriteService: writeWithDualWrite(<br/>primaryWriteOperation,<br/>secondaryWriteOperation,<br/>compensationOperation,<br/>entityType)
-    
-    Note over WriteService: Phase 1: Primary DB 쓰기
-    WriteService->>PrimaryDB: TransactionTemplate.execute()<br/>(JPA Repository 사용)
+    Note right of WriteService: Phase 1: Primary DB<br/>쓰기
+    WriteService->>PrimaryDB: TransactionTemplate.execute()<br/>(JPA Repository)
     PrimaryDB-->>WriteService: 저장된 엔티티 반환 (성공)
     
-    Note over WriteService: Phase 2: Secondary DB 쓰기
-    WriteService->>SecondaryDB: TransactionTemplate.execute()<br/>(JdbcTemplate 사용,<br/>Primary 결과의 ID 사용)
+    Note left of WriteService: Phase 2: Secondary DB<br/>쓰기
+    WriteService->>SecondaryDB: TransactionTemplate.execute()<br/>(JdbcTemplate,<br/>Primary ID 사용)
     SecondaryDB-->>WriteService: 성공
     
     WriteService-->>Service: Primary 결과 반환
     Service-->>Controller: MemoResponse
-    Controller-->>Client: 200 OK (생성/수정/삭제 성공)
+    Controller-->>Client: 200 OK
 ```
 
 ### 시나리오 2-5: Primary DB 쓰기 실패
@@ -143,18 +139,17 @@ sequenceDiagram
     participant PrimaryDB as Primary DB<br/>(MySQL)
 
     Client->>Controller: POST /api/v1/memos<br/>(PUT, DELETE)
-    Controller->>Service: createMemo(user, memo)<br/>(updateMemo, deleteMemo)
+    Controller->>Service: createMemo<br/>(updateMemo, deleteMemo)
+    Service->>WriteService: writeWithDualWrite
     
-    Service->>WriteService: writeWithDualWrite(<br/>primaryWriteOperation,<br/>secondaryWriteOperation,<br/>compensationOperation,<br/>entityType)
-    
-    Note over WriteService: Phase 1: Primary DB 쓰기
-    WriteService->>PrimaryDB: TransactionTemplate.execute()<br/>(JPA Repository 사용)
+    Note right of WriteService: Phase 1: Primary DB<br/>쓰기
+    WriteService->>PrimaryDB: TransactionTemplate.execute()<br/>(JPA Repository)
     PrimaryDB-->>WriteService: Exception 발생 (실패)
     
-    Note over WriteService: Primary 실패 시 즉시 Exception<br/>(Secondary로 Failover 불가)
+    Note left of WriteService: Primary 실패 시<br/>즉시 Exception<br/>(Secondary로<br/>Failover 불가)
     WriteService-->>Service: DatabaseWriteException<br/>("Primary DB 쓰기 실패")
     Service-->>Controller: Exception 전파
-    Controller-->>Client: 503 Service Unavailable<br/>(DatabaseWriteException)
+    Controller-->>Client: 503 Service Unavailable
 ```
 
 ### 시나리오 2-6: Primary DB 쓰기 성공 → Secondary DB 쓰기 실패 → 보상 트랜잭션 성공
@@ -169,25 +164,24 @@ sequenceDiagram
     participant SecondaryDB as Secondary DB<br/>(MySQL)
 
     Client->>Controller: POST /api/v1/memos<br/>(PUT, DELETE)
-    Controller->>Service: createMemo(user, memo)<br/>(updateMemo, deleteMemo)
+    Controller->>Service: createMemo<br/>(updateMemo, deleteMemo)
+    Service->>WriteService: writeWithDualWrite
     
-    Service->>WriteService: writeWithDualWrite(<br/>primaryWriteOperation,<br/>secondaryWriteOperation,<br/>compensationOperation,<br/>entityType)
-    
-    Note over WriteService: Phase 1: Primary DB 쓰기
-    WriteService->>PrimaryDB: TransactionTemplate.execute()<br/>(JPA Repository 사용)
+    Note right of WriteService: Phase 1: Primary DB<br/>쓰기
+    WriteService->>PrimaryDB: TransactionTemplate.execute()<br/>(JPA Repository)
     PrimaryDB-->>WriteService: 저장된 엔티티 반환 (성공)
     
-    Note over WriteService: Phase 2: Secondary DB 쓰기
-    WriteService->>SecondaryDB: TransactionTemplate.execute()<br/>(JdbcTemplate 사용)
+    Note left of WriteService: Phase 2: Secondary DB<br/>쓰기
+    WriteService->>SecondaryDB: TransactionTemplate.execute()<br/>(JdbcTemplate)
     SecondaryDB-->>WriteService: Exception 발생 (실패)
     
-    Note over WriteService: 보상 트랜잭션 실행
-    WriteService->>PrimaryDB: TransactionTemplate.execute()<br/>(compensationOperation 실행)
+    Note right of WriteService: 보상 트랜잭션<br/>실행
+    WriteService->>PrimaryDB: TransactionTemplate.execute()<br/>(compensationOperation)
     PrimaryDB-->>WriteService: 보상 트랜잭션 성공
     
     WriteService-->>Service: DatabaseWriteException<br/>("Secondary DB 쓰기 실패,<br/>Primary 보상 트랜잭션 실행됨")
     Service-->>Controller: Exception 전파
-    Controller-->>Client: 503 Service Unavailable<br/>(DatabaseWriteException)
+    Controller-->>Client: 503 Service Unavailable
 ```
 
 ### 시나리오 2-7: Primary DB 쓰기 성공 → Secondary DB 쓰기 실패 → 보상 트랜잭션 실패 → Recovery Queue 발행
@@ -203,32 +197,31 @@ sequenceDiagram
     participant RecoveryQueue as RecoveryQueueService
 
     Client->>Controller: POST /api/v1/memos<br/>(PUT, DELETE)
-    Controller->>Service: createMemo(user, memo)<br/>(updateMemo, deleteMemo)
+    Controller->>Service: createMemo<br/>(updateMemo, deleteMemo)
+    Service->>WriteService: writeWithDualWrite
     
-    Service->>WriteService: writeWithDualWrite(<br/>primaryWriteOperation,<br/>secondaryWriteOperation,<br/>compensationOperation,<br/>entityType)
-    
-    Note over WriteService: Phase 1: Primary DB 쓰기
-    WriteService->>PrimaryDB: TransactionTemplate.execute()<br/>(JPA Repository 사용)
+    Note right of WriteService: Phase 1: Primary DB<br/>쓰기
+    WriteService->>PrimaryDB: TransactionTemplate.execute()<br/>(JPA Repository)
     PrimaryDB-->>WriteService: 저장된 엔티티 반환 (성공)
     
-    Note over WriteService: Phase 2: Secondary DB 쓰기
-    WriteService->>SecondaryDB: TransactionTemplate.execute()<br/>(JdbcTemplate 사용)
+    Note left of WriteService: Phase 2: Secondary DB<br/>쓰기
+    WriteService->>SecondaryDB: TransactionTemplate.execute()<br/>(JdbcTemplate)
     SecondaryDB-->>WriteService: Exception 발생 (실패)
     
-    Note over WriteService: 보상 트랜잭션 실행 시도
-    WriteService->>PrimaryDB: TransactionTemplate.execute()<br/>(compensationOperation 실행)
-    PrimaryDB-->>WriteService: Exception 발생 (보상 트랜잭션 실패)
+    Note right of WriteService: 보상 트랜잭션<br/>실행 시도
+    WriteService->>PrimaryDB: TransactionTemplate.execute()<br/>(compensationOperation)
+    PrimaryDB-->>WriteService: Exception 발생<br/>(보상 트랜잭션 실패)
     
-    Note over WriteService: CRITICAL: 데이터 불일치 발생<br/>Recovery Queue에 이벤트 발행
+    Note left of WriteService: CRITICAL: 데이터 불일치<br/>Recovery Queue에<br/>이벤트 발행
     WriteService->>RecoveryQueue: publish(CompensationFailureEvent)
-    Note over RecoveryQueue: CompensationFailureEvent:<br/>- eventType: "SECONDARY_SYNC_RETRY"<br/>- entityId: 추출된 ID<br/>- entityType: "Memo", "UserShelfBook", etc.<br/>- targetDb: "Secondary"<br/>- failureTime: 현재 시간<br/>- errorMessage: 에러 메시지
+    Note right of RecoveryQueue: CompensationFailureEvent:<br/>eventType: "SECONDARY_SYNC_RETRY"<br/>entityId: 추출된 ID<br/>entityType: "Memo", etc.<br/>targetDb: "Secondary"<br/>failureTime: 현재 시간
     RecoveryQueue-->>WriteService: 이벤트 발행 완료
     
     WriteService-->>Service: DatabaseWriteException<br/>("Secondary DB 쓰기 실패,<br/>Primary 보상 트랜잭션 실행됨")
     Service-->>Controller: Exception 전파
-    Controller-->>Client: 503 Service Unavailable<br/>(DatabaseWriteException)
+    Controller-->>Client: 503 Service Unavailable
     
-    Note over RecoveryQueue: CompensationRecoveryWorker가<br/>비동기로 복구 시도
+    Note left of RecoveryQueue: CompensationRecoveryWorker가<br/>비동기로 복구 시도
 ```
 
 ---
