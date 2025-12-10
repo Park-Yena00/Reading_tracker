@@ -11,6 +11,7 @@
 ```mermaid
 C4Container
     title Container Diagram - Reading Tracker System
+    direction LR
 
     Person(user, "사용자", "독서 기록을 관리하는 사용자")
     
