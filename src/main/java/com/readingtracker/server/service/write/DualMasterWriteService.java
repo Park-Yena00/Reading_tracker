@@ -19,8 +19,14 @@ import java.util.function.Function;
 /**
  * MySQL 이중화를 위한 Custom Dual Write 서비스
  * 
- * Primary DB에 먼저 쓰기 → 성공 시 Secondary DB에 쓰기
- * Secondary 실패 시 Primary에 보상 트랜잭션 실행
+ * Dual-Master 방식: Primary DB와 Secondary DB 둘 다 필수
+ * 
+ * 동작 방식:
+ * - Primary DB에 먼저 쓰기 → 성공 시 Secondary DB에 쓰기
+ * - Secondary 실패 시 Primary에 보상 트랜잭션 실행
+ * 
+ * 주의: Secondary DB가 비활성화된 경우 서비스 사용 불가 (예외 발생)
+ * 서버는 시작되지만, 실제 Read/Write 작업 시도 시 서비스가 차단됩니다.
  */
 @Service
 public class DualMasterWriteService {
@@ -31,7 +37,7 @@ public class DualMasterWriteService {
     @Qualifier("primaryTransactionManager")
     private PlatformTransactionManager primaryTxManager;
     
-    @Autowired
+    @Autowired(required = false)
     @Qualifier("secondaryTransactionManager")
     private PlatformTransactionManager secondaryTxManager;
     
@@ -39,7 +45,7 @@ public class DualMasterWriteService {
     @Qualifier("primaryJdbcTemplate")
     private JdbcTemplate primaryJdbcTemplate;
     
-    @Autowired
+    @Autowired(required = false)
     @Qualifier("secondaryJdbcTemplate")
     private JdbcTemplate secondaryJdbcTemplate;
     
@@ -79,6 +85,23 @@ public class DualMasterWriteService {
         }
         
         // Phase 2: Secondary에 쓰기 (JdbcTemplate 사용, Primary 결과 전달)
+        // Dual-Master 방식이므로 Secondary DB가 필수입니다.
+        if (secondaryTxManager == null || secondaryJdbcTemplate == null) {
+            log.error("Secondary DB가 설정되지 않음. Dual-Master 방식에서는 Secondary DB가 필수입니다.");
+            // Primary에 보상 트랜잭션 실행 (Primary에 이미 쓰기가 완료되었으므로)
+            try {
+                TransactionTemplate compensationTx = new TransactionTemplate(primaryTxManager);
+                compensationTx.execute(status -> {
+                    compensationOperation.apply(primaryResult);
+                    return null;
+                });
+                log.info("Secondary DB 미설정으로 인한 보상 트랜잭션 실행 완료");
+            } catch (Exception compensationError) {
+                log.error("CRITICAL: Secondary DB 미설정으로 인한 보상 트랜잭션 실행 실패", compensationError);
+            }
+            throw new DatabaseWriteException("Secondary DB가 설정되지 않아 서비스를 사용할 수 없습니다. Dual-Master 방식에서는 Secondary DB가 필수입니다.");
+        }
+        
         try {
             TransactionTemplate secondaryTx = new TransactionTemplate(secondaryTxManager);
             secondaryTx.execute(status -> {

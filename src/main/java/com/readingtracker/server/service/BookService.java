@@ -8,12 +8,10 @@ import com.readingtracker.dbms.repository.primary.BookRepository;
 import com.readingtracker.dbms.repository.primary.UserShelfBookRepository;
 import com.readingtracker.dbms.repository.secondary.SecondaryUserShelfBookDao;
 import com.readingtracker.server.service.write.DualMasterWriteService;
-import com.readingtracker.server.dto.UserShelfBookCacheDTO;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -24,8 +22,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.TimeUnit;
 
 @Service
 // @Transactional 제거 (Dual Write를 위해)
@@ -39,11 +35,7 @@ public class BookService {
     @Autowired
     private UserShelfBookRepository userBookRepository;
     
-    @Autowired
-    private com.readingtracker.dbms.repository.primary.UserRepository userRepository;
     
-    @Autowired
-    private RedisTemplate<String, Object> redisTemplate;
     
     @Autowired
     private DualMasterWriteService dualMasterWriteService;
@@ -58,14 +50,10 @@ public class BookService {
     @Autowired
     private com.readingtracker.server.service.read.DualMasterReadService dualMasterReadService;
     
-    @Autowired
+    @Autowired(required = false)
     private SecondaryUserShelfBookDao secondaryUserShelfBookDao;
     
-    @Autowired
-    private com.readingtracker.server.mapper.BookMapper bookMapper;
     
-    private static final String CACHE_KEY_PREFIX = "my_shelf:user:";
-    private static final long TTL_MINUTES = 5; // 5분 (안전망 역할)
     
     /**
      * 내 서재에 책 추가
@@ -74,7 +62,6 @@ public class BookService {
      * Dual Write 적용: 복잡한 비즈니스 로직을 원자적 단위로 분리
      * 1. Book 조회/생성 (원자적 단위 1)
      * 2. UserShelfBook 저장 (원자적 단위 2, Dual Write 적용)
-     * 3. Redis 캐시 무효화 (부수 효과, DB 트랜잭션 외부)
      */
     public UserShelfBook addBookToShelf(UserShelfBook userShelfBook) {
         // 1. ISBN으로 Book 테이블에 이미 존재하는지 확인
@@ -115,9 +102,6 @@ public class BookService {
         
         // 5. UserShelfBook 저장 (Dual Write 적용)
         UserShelfBook savedUserShelfBook = saveUserShelfBookWithDualWrite(userShelfBook);
-        
-        // 6. 내 서재 캐시 무효화 (부수 효과, DB 트랜잭션 외부로 분리)
-        invalidateMyShelfCache(userShelfBook.getUserId());
         
         return savedUserShelfBook;
     }
@@ -457,9 +441,6 @@ public class BookService {
         // Dual Write 적용
         UserShelfBook savedBook = updateUserShelfBookWithDualWrite(userBook);
         
-        // 내 서재 캐시 무효화 (부수 효과, DB 트랜잭션 외부로 분리)
-        invalidateMyShelfCache(userBook.getUserId());
-        
         return savedBook;
     }
     
@@ -468,26 +449,14 @@ public class BookService {
      * userId를 받아서 처리
      * 
      * Dual Read 적용: Primary에서 읽기 시도, 실패 시 Secondary로 Failover
-     * Redis 캐싱: DTO 변환 후 저장하여 순환 참조 방지
      * 문서: MAPSTRUCT_ARCHITECTURE_DESIGN.md 준수 - DTO 변환은 Mapper가 담당
      */
     @Transactional(readOnly = true)
-    @SuppressWarnings("unchecked")
     public List<UserShelfBook> getMyShelf(Long userId, BookCategory category, BookSortCriteria sortBy) {
         // 1. 정렬 기준이 지정되지 않은 경우 기본값은 도서명 오름차순
         final BookSortCriteria finalSortBy = (sortBy != null) ? sortBy : BookSortCriteria.TITLE;
         
-        // 2. 캐시 키 생성
-        String cacheKey = buildCacheKey(userId, category, finalSortBy);
-        
-        // 3. Redis 캐시 확인 (DTO로 저장되어 있음)
-        List<UserShelfBookCacheDTO> cachedDtos = (List<UserShelfBookCacheDTO>) redisTemplate.opsForValue().get(cacheKey);
-        if (cachedDtos != null) {
-            // Mapper를 통해 DTO를 엔티티로 변환하여 반환
-            return bookMapper.toUserShelfBookEntityList(cachedDtos, userRepository);
-        }
-        
-        // 4. DB 조회 (Dual Read Failover 적용)
+        // 2. DB 조회 (Dual Read Failover 적용)
         final BookCategory finalCategory = category; // effectively final
         List<UserShelfBook> books = dualMasterReadService.readWithFailover(
             () -> {
@@ -505,34 +474,8 @@ public class BookService {
                 }
             }
         );
-        
-        // 5. Mapper를 통해 엔티티를 DTO로 변환하여 Redis에 저장 (TTL: 5분)
-        List<UserShelfBookCacheDTO> dtos = bookMapper.toUserShelfBookCacheDTOList(books);
-        redisTemplate.opsForValue().set(cacheKey, dtos, TTL_MINUTES, TimeUnit.MINUTES);
-        
+
         return books;
-    }
-    
-    /**
-     * 캐시 키 생성
-     */
-    private String buildCacheKey(Long userId, BookCategory category, BookSortCriteria sortBy) {
-        if (category != null) {
-            return CACHE_KEY_PREFIX + userId + ":category:" + category.name() + ":sort:" + sortBy.name();
-        } else {
-            return CACHE_KEY_PREFIX + userId + ":sort:" + sortBy.name();
-        }
-    }
-    
-    /**
-     * 사용자의 모든 내 서재 캐시 무효화 (Write-Through 패턴)
-     */
-    private void invalidateMyShelfCache(Long userId) {
-        String pattern = CACHE_KEY_PREFIX + userId + ":*";
-        Set<String> keys = redisTemplate.keys(pattern);
-        if (keys != null && !keys.isEmpty()) {
-            redisTemplate.delete(keys);
-        }
     }
     
     /**
@@ -615,7 +558,6 @@ public class BookService {
      */
     public void removeBookFromShelf(UserShelfBook userBook) {
         // 소유권 확인은 Controller에서 이미 완료된 것으로 가정
-        Long userId = userBook.getUserId();
         Long userBookId = userBook.getId();
         
         // Dual Write 적용
@@ -656,8 +598,6 @@ public class BookService {
             "UserShelfBook"  // 엔티티 타입 (Recovery Queue 발행용)
         );
         
-        // 내 서재 캐시 무효화 (부수 효과, DB 트랜잭션 외부로 분리)
-        invalidateMyShelfCache(userId);
     }
     
     /**
@@ -668,8 +608,6 @@ public class BookService {
      */
     public void updateBookCategory(UserShelfBook userBook, BookCategory category) {
         // 소유권 확인은 Controller에서 이미 완료된 것으로 가정
-        Long userId = userBook.getUserId();
-        
         // Entity만 받아서 카테고리 변경 처리
         userBook.setCategory(category);
         userBook.setUpdatedAt(LocalDateTime.now());
@@ -677,8 +615,6 @@ public class BookService {
         // Dual Write 적용
         updateUserShelfBookWithDualWrite(userBook);
         
-        // 내 서재 캐시 무효화 (부수 효과, DB 트랜잭션 외부로 분리)
-        invalidateMyShelfCache(userId);
     }
     
     /**
@@ -741,9 +677,6 @@ public class BookService {
         
         // Dual Write 적용
         UserShelfBook savedBook = updateUserShelfBookWithDualWrite(userBook);
-        
-        // 내 서재 캐시 무효화 (부수 효과, DB 트랜잭션 외부로 분리)
-        invalidateMyShelfCache(userBook.getUserId());
         
         return savedBook;
     }

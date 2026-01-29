@@ -53,7 +53,7 @@ public class MemoService {
     @Autowired
     private com.readingtracker.server.service.read.DualMasterReadService dualMasterReadService;
     
-    @Autowired
+    @Autowired(required = false)
     private SecondaryMemoDao secondaryMemoDao;
     
     @Autowired

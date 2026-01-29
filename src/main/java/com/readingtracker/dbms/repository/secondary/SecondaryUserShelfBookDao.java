@@ -5,6 +5,7 @@ import com.readingtracker.dbms.entity.UserShelfBook;
 import com.readingtracker.server.common.constant.BookCategory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -23,9 +24,10 @@ import java.util.Map;
  * Book과 JOIN하여 조회합니다.
  */
 @Repository
+@ConditionalOnProperty(name = "spring.datasource.secondary.enabled", havingValue = "true", matchIfMissing = false)
 public class SecondaryUserShelfBookDao {
     
-    @Autowired
+    @Autowired(required = false)
     @Qualifier("secondaryNamedParameterJdbcTemplate")
     private NamedParameterJdbcTemplate secondaryNamedParameterJdbcTemplate;
     

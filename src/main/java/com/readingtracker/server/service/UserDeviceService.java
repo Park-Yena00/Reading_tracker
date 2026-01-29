@@ -31,7 +31,7 @@ public class UserDeviceService {
     @Autowired
     private com.readingtracker.server.service.read.DualMasterReadService dualMasterReadService;
     
-    @Autowired
+    @Autowired(required = false)
     private SecondaryUserDeviceDao secondaryUserDeviceDao;
     
     @Autowired

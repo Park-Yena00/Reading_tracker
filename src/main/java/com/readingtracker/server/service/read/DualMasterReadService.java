@@ -15,9 +15,15 @@ import java.util.function.Supplier;
 /**
  * MySQL 이중화를 위한 Read Failover 서비스
  * 
- * Primary에서 읽기 시도 → 실패 시 Secondary로 Failover
+ * Dual-Master 방식: Primary DB와 Secondary DB 둘 다 필수
+ * 
+ * 동작 방식:
+ * - Primary에서 읽기 시도 → 실패 시 Secondary로 Failover
  * 
  * Read 작업은 JPA Repository(Primary)와 JdbcTemplate DAO(Secondary)를 사용합니다.
+ * 
+ * 주의: Secondary DB가 비활성화된 경우 서비스 사용 불가 (예외 발생)
+ * 서버는 시작되지만, 실제 Read/Write 작업 시도 시 서비스가 차단됩니다.
  */
 @Service
 public class DualMasterReadService {
@@ -28,7 +34,7 @@ public class DualMasterReadService {
     @Qualifier("primaryTransactionManager")
     private PlatformTransactionManager primaryTxManager;
     
-    @Autowired
+    @Autowired(required = false)
     @Qualifier("secondaryTransactionManager")
     private PlatformTransactionManager secondaryTxManager;
     
@@ -36,7 +42,7 @@ public class DualMasterReadService {
     @Qualifier("primaryJdbcTemplate")
     private JdbcTemplate primaryJdbcTemplate;
     
-    @Autowired
+    @Autowired(required = false)
     @Qualifier("secondaryJdbcTemplate")
     private JdbcTemplate secondaryJdbcTemplate;
     
@@ -51,6 +57,12 @@ public class DualMasterReadService {
      * @return 읽기 결과
      */
     public <T> T readWithFailover(Supplier<T> primaryReadOperation, Supplier<T> secondaryReadOperation) {
+        // Dual-Master 방식이므로 Secondary DB가 필수입니다.
+        if (secondaryTxManager == null || secondaryReadOperation == null) {
+            log.error("Secondary DB가 설정되지 않음. Dual-Master 방식에서는 Secondary DB가 필수입니다.");
+            throw new DatabaseUnavailableException("Secondary DB가 설정되지 않아 서비스를 사용할 수 없습니다. Dual-Master 방식에서는 Secondary DB가 필수입니다.");
+        }
+        
         // Primary에서 시도
         try {
             TransactionTemplate txTemplate = new TransactionTemplate(primaryTxManager);
@@ -60,7 +72,7 @@ public class DualMasterReadService {
             return result;
             
         } catch (Exception e) {
-            log.warn("Primary DB 읽기 실패, Secondary DB로 전환", e);
+            log.warn("Primary DB 읽기 실패, Secondary DB로 전환 시도", e);
             
             // Secondary에서 시도 (JdbcTemplate DAO 사용)
             try {
@@ -90,6 +102,12 @@ public class DualMasterReadService {
      */
     @Deprecated
     public <T> T readWithFailover(Supplier<T> readOperation) {
+        // Dual-Master 방식이므로 Secondary DB가 필수입니다.
+        if (secondaryTxManager == null) {
+            log.error("Secondary DB가 설정되지 않음. Dual-Master 방식에서는 Secondary DB가 필수입니다.");
+            throw new DatabaseUnavailableException("Secondary DB가 설정되지 않아 서비스를 사용할 수 없습니다. Dual-Master 방식에서는 Secondary DB가 필수입니다.");
+        }
+        
         // Primary에서 시도
         try {
             TransactionTemplate txTemplate = new TransactionTemplate(primaryTxManager);

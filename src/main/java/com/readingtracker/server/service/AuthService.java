@@ -47,10 +47,10 @@ public class AuthService {
     @Autowired
     private DualMasterReadService dualMasterReadService;
     
-    @Autowired
+    @Autowired(required = false)
     private SecondaryUserDao secondaryUserDao;
     
-    @Autowired
+    @Autowired(required = false)
     private SecondaryPasswordResetTokenDao secondaryPasswordResetTokenDao;
     
     @Autowired
@@ -79,13 +79,13 @@ public class AuthService {
         // 1. 중복 확인 (Dual Read Failover 적용)
         if (dualMasterReadService.readWithFailover(
             () -> userRepository.existsByLoginId(user.getLoginId()),
-            () -> secondaryUserDao.existsByLoginId(user.getLoginId()))) {
+            () -> secondaryUserDao != null ? secondaryUserDao.existsByLoginId(user.getLoginId()) : false)) {
             throw new IllegalArgumentException(ErrorCode.DUPLICATE_LOGIN_ID.getMessage());
         }
         
         if (dualMasterReadService.readWithFailover(
             () -> userRepository.existsByEmail(user.getEmail()),
-            () -> secondaryUserDao.existsByEmail(user.getEmail()))) {
+            () -> secondaryUserDao != null ? secondaryUserDao.existsByEmail(user.getEmail()) : false)) {
             throw new IllegalArgumentException(ErrorCode.DUPLICATE_EMAIL.getMessage());
         }
         
@@ -155,10 +155,10 @@ public class AuthService {
      */
     private LoginResult executeLogin(String loginId, String password) {
         // 1. 사용자 조회 (loginId만 허용) - Dual Read Failover 적용
-        User user = dualMasterReadService.readWithFailover(
+        java.util.Optional<User> userOpt = dualMasterReadService.readWithFailover(
             () -> userRepository.findByLoginId(loginId),
-            () -> secondaryUserDao.findByLoginId(loginId))
-            .orElseThrow(() -> new IllegalArgumentException(ErrorCode.USER_NOT_FOUND.getMessage()));
+            () -> secondaryUserDao != null ? secondaryUserDao.findByLoginId(loginId) : java.util.Optional.<User>empty());
+        User user = userOpt.orElseThrow(() -> new IllegalArgumentException(ErrorCode.USER_NOT_FOUND.getMessage()));
         
         // 2. 계정 상태 확인
         if (user.getStatus() == User.Status.LOCKED) {
@@ -218,10 +218,10 @@ public class AuthService {
      */
     private User executeFindLoginId(String email, String name) {
         // 이메일 + 이름으로 활성 사용자 조회 (둘 다 일치해야 함) - Dual Read Failover 적용
-        User user = dualMasterReadService.readWithFailover(
+        java.util.Optional<User> userOpt = dualMasterReadService.readWithFailover(
             () -> userRepository.findActiveUserByEmailAndName(email, name),
-            () -> secondaryUserDao.findActiveUserByEmailAndName(email, name))
-            .orElseThrow(() -> new IllegalArgumentException("존재하지 않는 계정입니다."));
+            () -> secondaryUserDao != null ? secondaryUserDao.findActiveUserByEmailAndName(email, name) : java.util.Optional.<User>empty());
+        User user = userOpt.orElseThrow(() -> new IllegalArgumentException("존재하지 않는 계정입니다."));
         
         return user;
     }
@@ -244,10 +244,10 @@ public class AuthService {
      */
     private String executeVerifyAccount(String loginId, String email) {
         // 1. loginId + email로 활성 사용자 조회 (둘 다 일치해야 함) - Dual Read Failover 적용
-        User user = dualMasterReadService.readWithFailover(
+        java.util.Optional<User> userOpt = dualMasterReadService.readWithFailover(
             () -> userRepository.findActiveUserByLoginIdAndEmail(loginId, email),
-            () -> secondaryUserDao.findActiveUserByLoginIdAndEmail(loginId, email))
-            .orElseThrow(() -> new IllegalArgumentException("존재하지 않는 계정입니다."));
+            () -> secondaryUserDao != null ? secondaryUserDao.findActiveUserByLoginIdAndEmail(loginId, email) : java.util.Optional.<User>empty());
+        User user = userOpt.orElseThrow(() -> new IllegalArgumentException("존재하지 않는 계정입니다."));
         
         // 2. 기존 토큰 삭제 (같은 사용자의 이전 재설정 토큰)
         passwordResetTokenRepository.deleteAllByUserId(user.getId());
@@ -285,20 +285,20 @@ public class AuthService {
      */
     private User executeResetPassword(String resetToken, String newPassword, String confirmPassword) {
         // 1. 토큰 검증 - Dual Read Failover 적용
-        PasswordResetToken tokenEntity = dualMasterReadService.readWithFailover(
+        java.util.Optional<PasswordResetToken> tokenOpt = dualMasterReadService.readWithFailover(
             () -> passwordResetTokenRepository.findValidToken(resetToken, LocalDateTime.now()),
-            () -> secondaryPasswordResetTokenDao.findValidToken(resetToken, LocalDateTime.now()))
-            .orElseThrow(() -> new IllegalArgumentException("유효하지 않거나 만료된 토큰입니다."));
+            () -> secondaryPasswordResetTokenDao != null ? secondaryPasswordResetTokenDao.findValidToken(resetToken, LocalDateTime.now()) : java.util.Optional.<PasswordResetToken>empty());
+        PasswordResetToken tokenEntity = tokenOpt.orElseThrow(() -> new IllegalArgumentException("유효하지 않거나 만료된 토큰입니다."));
         
         // 2. 토큰으로 사용자 조회 - Dual Read Failover 적용
         Long userId = tokenEntity.getUserId();
         if (userId == null) {
             throw new IllegalArgumentException("토큰에 사용자 ID가 없습니다.");
         }
-        User user = dualMasterReadService.readWithFailover(
+        java.util.Optional<User> userOpt = dualMasterReadService.readWithFailover(
             () -> userRepository.findById(userId),
-            () -> secondaryUserDao.findById(userId))
-            .orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
+            () -> secondaryUserDao != null ? secondaryUserDao.findById(userId) : java.util.Optional.<User>empty());
+        User user = userOpt.orElseThrow(() -> new IllegalArgumentException("사용자를 찾을 수 없습니다."));
         
         // 3. 사용자 상태 확인 (ACTIVE만 허용)
         if (!"ACTIVE".equals(user.getStatus().name())) {

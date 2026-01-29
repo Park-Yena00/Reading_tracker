@@ -3,6 +3,7 @@ package com.readingtracker.dbms.repository.secondary;
 import com.readingtracker.dbms.entity.PasswordResetToken;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -21,9 +22,10 @@ import java.util.Optional;
  * JdbcTemplate을 사용하여 SecondaryDB에 직접 접근합니다.
  */
 @Repository
+@ConditionalOnProperty(name = "spring.datasource.secondary.enabled", havingValue = "true", matchIfMissing = false)
 public class SecondaryPasswordResetTokenDao {
     
-    @Autowired
+    @Autowired(required = false)
     @Qualifier("secondaryNamedParameterJdbcTemplate")
     private NamedParameterJdbcTemplate secondaryNamedParameterJdbcTemplate;
     

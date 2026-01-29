@@ -15,6 +15,7 @@ spring:
         maximum-pool-size: 10
         minimum-idle: 5
     secondary:
+      enabled: ${SECONDARY_DB_ENABLED:true}  # SecondaryDB 활성화 여부 (기본값: true) / docker compose에서 직접 중단하거나 명령어 입력으로 비활성화 가능능
       url: jdbc:mysql://localhost:3307/reading_tracker?useSSL=false&serverTimezone=Asia/Seoul&characterEncoding=UTF-8&allowPublicKeyRetrieval=true
       username: root
       password: ${SECONDARY_DB_PASSWORD:Yenapark1000}

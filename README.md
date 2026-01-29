@@ -131,6 +131,11 @@ spring:
       url: jdbc:mysql://localhost:3306/reading_tracker?useSSL=false&serverTimezone=Asia/Seoul&allowPublicKeyRetrieval=true
       username: root
       password: Yenapark1000
+    secondary:
+      enabled: ${SECONDARY_DB_ENABLED:true}  
+      url: jdbc:mysql://localhost:3307/reading_tracker?useSSL=false&serverTimezone=Asia/Seoul&characterEncoding=UTF-8&allowPublicKeyRetrieval=true
+      username: root
+      password: Yenapark1000
 ```
    
    **참고**: 프로젝트는 한국 시간대(Asia/Seoul, UTC+9)를 기준으로 동작합니다. 모든 시간 필드값이 한국 시간대로 저장됩니다.

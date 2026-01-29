@@ -18,7 +18,7 @@ public class UserService {
     @Autowired
     private DualMasterReadService dualMasterReadService;
     
-    @Autowired
+    @Autowired(required = false)
     private SecondaryUserDao secondaryUserDao;
     
     /**

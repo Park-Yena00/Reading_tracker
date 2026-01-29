@@ -42,7 +42,7 @@ public class JwtService {
     @Autowired
     private DualMasterReadService dualMasterReadService;
     
-    @Autowired
+    @Autowired(required = false)
     private SecondaryUserDao secondaryUserDao;
     
     @Autowired

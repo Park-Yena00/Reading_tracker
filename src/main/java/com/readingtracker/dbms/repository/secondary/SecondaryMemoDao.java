@@ -4,6 +4,7 @@ import com.readingtracker.dbms.entity.Memo;
 import com.readingtracker.dbms.entity.Tag;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -25,9 +26,10 @@ import java.util.Map;
  * 주의: Tag는 LAZY 로딩이므로 별도로 조회해야 합니다.
  */
 @Repository
+@ConditionalOnProperty(name = "spring.datasource.secondary.enabled", havingValue = "true", matchIfMissing = false)
 public class SecondaryMemoDao {
     
-    @Autowired
+    @Autowired(required = false)
     @Qualifier("secondaryNamedParameterJdbcTemplate")
     private NamedParameterJdbcTemplate secondaryNamedParameterJdbcTemplate;
     

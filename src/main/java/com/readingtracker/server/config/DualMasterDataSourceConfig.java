@@ -2,6 +2,7 @@ package com.readingtracker.server.config;
 
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.jdbc.DataSourceBuilder;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.ComponentScan;
@@ -91,34 +92,48 @@ public class DualMasterDataSourceConfig {
     }
     
     // ========== Secondary DataSource 설정 ==========
+    // SecondaryDB는 선택적(optional)이므로, 연결 실패 시에도 애플리케이션이 시작되도록 설정
     
     @Bean
+    @ConditionalOnProperty(name = "spring.datasource.secondary.enabled", havingValue = "true", matchIfMissing = false)
     public DataSource secondaryDataSource(
             @Value("${spring.datasource.secondary.url}") String url,
             @Value("${spring.datasource.secondary.username}") String username,
             @Value("${spring.datasource.secondary.password}") String password,
             @Value("${spring.datasource.secondary.driver-class-name}") String driverClassName) {
-        return DataSourceBuilder.create()
+        DataSource dataSource = DataSourceBuilder.create()
                 .url(url)
                 .username(username)
                 .password(password)
                 .driverClassName(driverClassName)
                 .build();
+        
+        // HikariCP 설정: 연결 실패 시 즉시 실패하지 않도록 설정
+        if (dataSource instanceof com.zaxxer.hikari.HikariDataSource) {
+            com.zaxxer.hikari.HikariDataSource hikariDataSource = (com.zaxxer.hikari.HikariDataSource) dataSource;
+            hikariDataSource.setInitializationFailTimeout(-1); // 연결 실패 시 무한 대기 (실제로는 사용 시점에 실패)
+            hikariDataSource.setConnectionTimeout(3000); // 연결 타임아웃 3초
+        }
+        
+        return dataSource;
     }
     
     @Bean
+    @ConditionalOnProperty(name = "spring.datasource.secondary.enabled", havingValue = "true", matchIfMissing = false)
     public PlatformTransactionManager secondaryTransactionManager(
             @Qualifier("secondaryDataSource") DataSource secondaryDataSource) {
         return new org.springframework.jdbc.datasource.DataSourceTransactionManager(secondaryDataSource);
     }
     
     @Bean
+    @ConditionalOnProperty(name = "spring.datasource.secondary.enabled", havingValue = "true", matchIfMissing = false)
     public JdbcTemplate secondaryJdbcTemplate(
             @Qualifier("secondaryDataSource") DataSource secondaryDataSource) {
         return new JdbcTemplate(secondaryDataSource);
     }
     
     @Bean
+    @ConditionalOnProperty(name = "spring.datasource.secondary.enabled", havingValue = "true", matchIfMissing = false)
     public NamedParameterJdbcTemplate secondaryNamedParameterJdbcTemplate(
             @Qualifier("secondaryDataSource") DataSource secondaryDataSource) {
         return new NamedParameterJdbcTemplate(secondaryDataSource);
@@ -126,6 +141,7 @@ public class DualMasterDataSourceConfig {
     
     // Secondary Repository 설정 (필요시 사용)
     @Configuration
+    @ConditionalOnProperty(name = "spring.datasource.secondary.enabled", havingValue = "true", matchIfMissing = true)
     @EnableJpaRepositories(
         basePackages = "com.readingtracker.dbms.repository.secondary",
         entityManagerFactoryRef = "secondaryEntityManagerFactory",
@@ -135,6 +151,7 @@ public class DualMasterDataSourceConfig {
     }
     
     @Bean
+    @ConditionalOnProperty(name = "spring.datasource.secondary.enabled", havingValue = "true", matchIfMissing = false)
     public LocalContainerEntityManagerFactoryBean secondaryEntityManagerFactory(
             @Qualifier("secondaryDataSource") DataSource secondaryDataSource) {
         LocalContainerEntityManagerFactoryBean em = new LocalContainerEntityManagerFactoryBean();
